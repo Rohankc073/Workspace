@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgres:16
+    container_name: atlas-db
+    restart: unless-stopped
+    ports:
+      - "55432:5432"
+    environment:
+      POSTGRES_DB: atlas
+      POSTGRES_USER: atlas
+      POSTGRES_PASSWORD: atlaspass123
+    volumes:
+      - atlas_db:/var/lib/postgresql/data
+
+  onlyoffice:
+    image: onlyoffice/documentserver:latest
+    container_name: atlas-onlyoffice
+    restart: unless-stopped
+    ports:
+      - "8082:80"
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: atlassecret456
+    volumes:
+      - atlas_oo_data:/var/www/onlyoffice/Data
+      - atlas_oo_logs:/var/log/onlyoffice
+
+volumes:
+  atlas_db:
+  atlas_oo_data:
+  atlas_oo_logs:

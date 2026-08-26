@@ -1,0 +1,183 @@
+:root {
+  --bg: #f8f9fa;
+  --panel: #ffffff;
+  --card: #ffffff;
+  --hover: #f1f3f4;
+
+  --line: #dadce0;
+  --line-soft: #e8eaed;
+
+  --text: #202124;
+  --text-2: #3c4043;
+  --muted: #5f6368;
+
+  --accent: #1a73e8;
+  --accent-hover: #1765cc;
+  --accent-soft: #e8f0fe;
+
+  --ink: #202124;
+  --on-ink: #ffffff;
+  --danger: #d93025;
+  --danger-soft: #fce8e6;
+
+  --shadow: 0 1px 2px rgba(60, 64, 67, 0.3), 0 1px 3px 1px rgba(60, 64, 67, 0.15);
+  --shadow-raised: 0 1px 3px rgba(60, 64, 67, 0.3), 0 4px 8px 3px rgba(60, 64, 67, 0.15);
+
+  --r-card: 8px;
+  --r-pill: 999px;
+
+  --sans: "Google Sans", Roboto, Inter, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --serif: var(--sans);
+
+  /* Kept so old references to gold still resolve to something sane. */
+  --gold: var(--accent);
+  --gold-fill: var(--accent);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.eyebrow {
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+}
+
+.display {
+  font-family: var(--sans);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+input,
+select,
+button {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* ---- Buttons -------------------------------------------------------
+   Four kinds, defined once. Components use className rather than
+   inline styles, so a change here reaches the whole app.            */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 20px;
+  border-radius: var(--r-pill);
+  border: 1px solid transparent;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  box-shadow: var(--shadow);
+}
+
+.btn-secondary {
+  background: var(--panel);
+  color: var(--accent);
+  border-color: var(--line);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
+.btn-text {
+  background: transparent;
+  color: var(--accent);
+  padding: 0 12px;
+  height: 32px;
+}
+
+.btn-text:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.btn-danger {
+  background: transparent;
+  color: var(--danger);
+  padding: 0 12px;
+  height: 32px;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+/* Small variant for buttons inside table rows. */
+.btn-sm {
+  height: 30px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
+/* ---- Form fields --------------------------------------------------- */
+
+.field {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.field:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}

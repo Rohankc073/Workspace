@@ -1,0 +1,209 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  
+}
+
+/// A tenant. Staff belong to one or more of these.
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  domain    String   @unique
+  createdAt DateTime @default(now())
+
+  memberships Membership[]
+  folders     Folder[]
+  files       File[]
+  activities  Activity[]
+  deletedAt DateTime?
+  
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  isSuperAdmin Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  memberships Membership[]
+  sessions    Session[]
+  activities  Activity[]
+  permissions Permission[]
+  uploads     File[]        @relation("uploader")
+  versions    FileVersion[]
+  folders     Folder[]
+  shareLinks ShareLink[]
+  lastSeenAt DateTime?
+}
+
+enum Role {
+  VIEWER
+  EDITOR
+  MANAGER
+  ADMIN
+}
+
+/// Which people are in which company, and what they may do by default.
+model Membership {
+  id        String   @id @default(cuid())
+  userId    String
+  companyId String
+  role      Role     @default(VIEWER)
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, companyId])
+}
+
+model Folder {
+  id          String    @id @default(cuid())
+  companyId   String
+  parentId    String?
+  name        String
+  createdById String?
+  createdAt   DateTime  @default(now())
+  deletedAt   DateTime?
+
+  company     Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  parent      Folder?      @relation("FolderTree", fields: [parentId], references: [id])
+  children    Folder[]     @relation("FolderTree")
+  createdBy   User?        @relation(fields: [createdById], references: [id])
+  files       File[]
+  permissions Permission[]
+
+  @@index([companyId, parentId])
+}
+
+model File {
+  id        String @id @default(cuid())
+  companyId String
+  folderId  String?
+  name      String
+  extension String
+  size      Int    @default(0)
+  /// Bumped on every save. Feeds the OnlyOffice document key.
+  version      Int      @default(1)
+  storageKey   String
+  uploadedById String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  company     Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  folder      Folder?       @relation(fields: [folderId], references: [id])
+  uploadedBy  User?         @relation("uploader", fields: [uploadedById], references: [id])
+  versions    FileVersion[]
+  permissions Permission[]
+  activities  Activity[]
+  shareLinks ShareLink[]
+
+  @@index([companyId, folderId])
+}
+
+model FileVersion {
+  id          String   @id @default(cuid())
+  fileId      String
+  version     Int
+  storageKey  String
+  size        Int      @default(0)
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  /// Editing data from OnlyOffice, used to highlight what changed.
+  /// Null for versions we created ourselves, such as restores.
+  changesKey     String?
+  serverVersion  String?
+  changesSummary Json?
+
+  file      File  @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  createdBy User? @relation(fields: [createdById], references: [id])
+
+  @@unique([fileId, version])
+}
+
+/// A grant on one folder or one file, to one person or to a whole role.
+model Permission {
+  id       String  @id @default(cuid())
+  folderId String?
+  fileId   String?
+  userId   String?
+  role     Role?
+
+  canView     Boolean @default(false)
+  canEdit     Boolean @default(false)
+  canComment  Boolean @default(false)
+  canDownload Boolean @default(false)
+  canPrint    Boolean @default(false)
+  canDelete   Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  folder Folder? @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  file   File?   @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ShareLink {
+  id     String @id @default(cuid())
+  token  String @unique
+  fileId String
+
+  canDownload Boolean @default(false)
+  canEdit     Boolean @default(false)
+
+  passwordHash String?
+  expiresAt    DateTime?
+  revokedAt    DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  file      File  @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  createdBy User? @relation(fields: [createdById], references: [id])
+
+  @@index([fileId])
+}
+
+/// Append-only. Never build an update or delete route for this table.
+model Activity {
+  id        String   @id @default(cuid())
+  companyId String?
+  userId    String?
+  action    String
+  fileId    String?
+  detail    Json?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  company Company? @relation(fields: [companyId], references: [id])
+  user    User?    @relation(fields: [userId], references: [id])
+  file    File?    @relation(fields: [fileId], references: [id])
+
+  @@index([companyId, createdAt])
+}
+
+
+
+
