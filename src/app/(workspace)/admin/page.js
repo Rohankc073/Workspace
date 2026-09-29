@@ -14,7 +14,32 @@ const ICONS = {
   active: "M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z",
   documents:
     "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
+  storage:
+    "M12 3C7.58 3 4 4.79 4 7v10c0 2.21 3.58 4 8 4s8-1.79 8-4V7c0-2.21-3.58-4-8-4zm0 2c3.87 0 6 1.5 6 2s-2.13 2-6 2-6-1.5-6-2 2.13-2 6-2zm6 12c0 .5-2.13 2-6 2s-6-1.5-6-2v-2.23C7.61 15.5 9.72 16 12 16s4.39-.5 6-1.23V17zm0-4c0 .5-2.13 2-6 2s-6-1.5-6-2v-2.23C7.61 11.5 9.72 12 12 12s4.39-.5 6-1.23V13z",
+  archive:
+    "M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.89 2 2 2h14c1.11 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM12 17.5L6.5 12H10v-2h4v2h3.5L12 17.5zM5.12 5l.81-1h12l.94 1H5.12z",
 };
+
+/** Icon tint per stat, so a row of identical blue chips reads as four things. */
+const TONES = {
+  blue: { bg: "rgba(26,115,232,.10)", fg: "#1a73e8" },
+  green: { bg: "rgba(15,157,88,.10)", fg: "#0f9d58" },
+  purple: { bg: "rgba(161,66,244,.10)", fg: "#a142f4" },
+  amber: { bg: "rgba(244,180,0,.14)", fg: "#b06000" },
+};
+
+function formatBytes(n) {
+  if (!n) return "0 KB";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  const val = i === 0 || v >= 100 ? Math.round(v) : v.toFixed(1);
+  return `${val} ${units[i]}`;
+}
 
 export default async function AdminPage({ searchParams }) {
   const user = await getCurrentUser();
@@ -34,12 +59,31 @@ export default async function AdminPage({ searchParams }) {
     );
   }
 
-  const companyFilter = user.isSuperAdmin ? {} : { id: { in: adminOf } };
+  // The archive is a Company row, but not a company anyone belongs to. It is
+  // excluded from every list here: it has no members, no domain worth
+  // showing, and it must never appear in a picker that could add someone to
+  // it. Its contents live at /admin/archive instead.
+  const companyFilter = user.isSuperAdmin
+    ? { isArchive: false }
+    : { id: { in: adminOf }, isArchive: false };
+
   const userFilter = user.isSuperAdmin
     ? {}
     : { memberships: { some: { companyId: { in: adminOf } } } };
 
-  const [companies, people, deletedCompanies] = await Promise.all([
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const scopedFiles = user.isSuperAdmin
+    ? { deletedAt: null, company: { isArchive: false } }
+    : { deletedAt: null, companyId: { in: adminOf } };
+
+  const [
+    companies,
+    people,
+    deletedCompanies,
+    weekFiles,
+    storageAgg,
+    archiveCount,
+  ] = await Promise.all([
     prisma.company.findMany({
       where: { ...companyFilter, deletedAt: null },
       orderBy: { name: "asc" },
@@ -52,11 +96,22 @@ export default async function AdminPage({ searchParams }) {
     }),
     user.isSuperAdmin
       ? prisma.company.findMany({
-          where: { deletedAt: { not: null } },
+          where: { deletedAt: { not: null }, isArchive: false },
           orderBy: { deletedAt: "desc" },
           include: { _count: { select: { memberships: true, files: true } } },
         })
       : Promise.resolve([]),
+    // Context for the document count — a total on its own says nothing
+    // about whether the system is being used.
+    prisma.file.count({
+      where: { ...scopedFiles, createdAt: { gte: since } },
+    }),
+    prisma.file.aggregate({ where: scopedFiles, _sum: { size: true } }),
+    user.isSuperAdmin
+      ? prisma.file.count({
+          where: { deletedAt: null, company: { isArchive: true } },
+        })
+      : Promise.resolve(0),
   ]);
 
   const title = user.isSuperAdmin
@@ -66,9 +121,13 @@ export default async function AdminPage({ searchParams }) {
     ? "Every company in the group."
     : "You manage this company only.";
 
-  // Flatten to plain objects — the tables are client components now, so
-  // anything crossing that boundary has to be serialisable (no Prisma
-  // model instances, no Date objects).
+  const activeCount = people.filter((p) => p.isActive).length;
+  const disabledCount = people.length - activeCount;
+  const docCount = companies.reduce((sum, c) => sum + c._count.files, 0);
+  const storageBytes = storageAgg._sum.size ?? 0;
+
+  // Flatten to plain objects — the tables are client components, so anything
+  // crossing that boundary has to be serialisable (no Prisma models, no Dates).
   const plainCompanies = companies.map((c) => ({
     id: c.id,
     name: c.name,
@@ -103,40 +162,96 @@ export default async function AdminPage({ searchParams }) {
   const companyOptions = plainCompanies.map((c) => ({
     id: c.id,
     name: c.name,
+    // NewUser builds the address in front of you — without this the suffix
+    // reads a literal "@domain" instead of the company's own.
+    domain: c.domain,
   }));
 
   return (
     <>
       <style>{`
-        .admin-metric { transition: transform .16s ease, box-shadow .16s ease; }
-        .admin-metric:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(17,24,39,.08); }
+        .admin-metric { transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
+        .admin-metric:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 8px 24px rgba(17,24,39,.08);
+          border-color: var(--line);
+        }
         .admin-row { transition: background-color .12s ease; }
         .admin-row:hover { background: var(--bg); }
         .company-link { color: inherit; text-decoration: none; cursor: pointer; }
         .company-link:hover { text-decoration: underline; }
         .adm-search-btn:hover { background: var(--bg); color: var(--text); }
+        .adm-subtab:hover { color: var(--text); }
+        .adm-archive-link { transition: background .14s ease, border-color .14s ease; }
+        .adm-archive-link:hover { background: var(--accent-soft); border-color: var(--accent); }
       `}</style>
 
-      <header style={S.head}>
-        <p style={S.eyebrow}>Administration</p>
-        <h1 style={S.h1}>{title}</h1>
-        <p style={S.sub}>{scope}</p>
+      {/* A tinted band, so the title has somewhere to sit rather than
+          floating in white above a hairline. */}
+      <header style={S.hero}>
+        <div style={S.heroText}>
+          <p style={S.eyebrow}>Administration</p>
+          <h1 style={S.h1}>{title}</h1>
+          <p style={S.sub}>{scope}</p>
+        </div>
+
+        {/* The archive has no other way in — it isn't in the sidebar and it
+            isn't a company in any list. */}
+        {user.isSuperAdmin ? (
+          <Link
+            href="/admin/archive"
+            className="adm-archive-link"
+            style={S.archiveLink}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d={ICONS.archive} />
+            </svg>
+            Archive
+            {archiveCount > 0 ? (
+              <span style={S.archiveCount}>{archiveCount}</span>
+            ) : null}
+          </Link>
+        ) : null}
       </header>
 
       <div style={S.stats}>
         {user.isSuperAdmin ? (
-          <Stat icon="company" label="Companies" value={companies.length} />
+          <Stat
+            icon="company"
+            tone="purple"
+            label="Companies"
+            value={companies.length}
+          />
         ) : null}
-        <Stat icon="people" label="People" value={people.length} />
         <Stat
-          icon="active"
-          label="Active accounts"
-          value={people.filter((p) => p.isActive).length}
+          icon="people"
+          tone="green"
+          label="People"
+          value={people.length}
+          note={disabledCount > 0 ? `${disabledCount} disabled` : "All active"}
         />
         <Stat
           icon="documents"
+          tone="blue"
           label="Documents"
-          value={companies.reduce((sum, c) => sum + c._count.files, 0)}
+          value={docCount}
+          note={
+            weekFiles > 0
+              ? `${weekFiles} added this week`
+              : "None added this week"
+          }
+        />
+        <Stat
+          icon="storage"
+          tone="amber"
+          label="Storage used"
+          value={formatBytes(storageBytes)}
         />
       </div>
 
@@ -145,12 +260,14 @@ export default async function AdminPage({ searchParams }) {
           <div style={S.subtabs}>
             <Link
               href="/admin"
+              className="adm-subtab"
               style={ctab === "active" ? S.subtabOn : S.subtab}
             >
               Active
             </Link>
             <Link
               href="/admin?ctab=trash"
+              className="adm-subtab"
               style={ctab === "trash" ? S.subtabOn : S.subtab}
             >
               Trash
@@ -207,7 +324,13 @@ export default async function AdminPage({ searchParams }) {
                           })}
                         </td>
                         <td style={S.tdRight}>
-                          <CompanyTrashActions companyId={c.id} name={c.name} />
+                          {/* companies feeds the "move the documents to
+                              another company" option in the purge dialog. */}
+                          <CompanyTrashActions
+                            companyId={c.id}
+                            name={c.name}
+                            companies={companyOptions}
+                          />
                         </td>
                       </tr>
                     ))}
@@ -240,33 +363,69 @@ export default async function AdminPage({ searchParams }) {
   );
 }
 
-function Stat({ icon, label, value }) {
+function Stat({ icon, tone = "blue", value, label, note }) {
+  const t = TONES[tone] ?? TONES.blue;
   return (
     <div className="admin-metric" style={S.stat}>
-      <span style={S.statIcon}>
-        <svg
-          viewBox="0 0 24 24"
-          width="19"
-          height="19"
-          fill="currentColor"
-          aria-hidden="true"
-        >
-          <path d={ICONS[icon]} />
-        </svg>
-      </span>
-      <div>
-        <p style={S.statValue}>{value}</p>
-        <p style={S.statLabel}>{label}</p>
+      {/* Icon and number on one line: stacked, each card was tall and
+          mostly empty space. */}
+      <div style={S.statTop}>
+        <span style={{ ...S.statIcon, background: t.bg, color: t.fg }}>
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path d={ICONS[icon]} />
+          </svg>
+        </span>
+        <p style={S.statValue}>{value ?? 0}</p>
       </div>
+      <p style={S.statLabel}>{label}</p>
+      {note ? <p style={S.statNote}>{note}</p> : null}
     </div>
   );
 }
 
 const S = {
-  head: {
-    paddingBottom: 22,
-    borderBottom: "1px solid var(--line-soft)",
-    marginBottom: 26,
+  hero: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 20,
+    flexWrap: "wrap",
+    padding: "26px 28px",
+    marginBottom: 20,
+    borderRadius: 16,
+    background:
+      "linear-gradient(135deg, var(--accent-soft) 0%, rgba(161,66,244,.07) 55%, transparent 100%)",
+    border: "1px solid var(--line-soft)",
+  },
+  heroText: { minWidth: 0 },
+  archiveLink: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    height: 38,
+    padding: "0 16px",
+    background: "var(--panel)",
+    border: "1px solid var(--line)",
+    borderRadius: 999,
+    color: "var(--text-2)",
+    fontSize: 13.5,
+    fontWeight: 500,
+    textDecoration: "none",
+    whiteSpace: "nowrap",
+  },
+  archiveCount: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: "var(--muted)",
+    background: "var(--bg)",
+    borderRadius: 999,
+    padding: "1px 7px",
   },
   eyebrow: {
     fontSize: 12,
@@ -286,41 +445,44 @@ const S = {
 
   stats: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
-    gap: 16,
+    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+    gap: 14,
   },
   stat: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 20,
-    padding: "22px 22px 20px",
+    padding: "18px 20px 16px",
     background: "var(--panel)",
-    border: "1px solid var(--line)",
-    borderRadius: "var(--r-card)",
+    border: "1px solid var(--line-soft)",
+    borderRadius: 14,
     boxShadow: "0 1px 2px rgba(17,24,39,.04)",
   },
+  statTop: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 12,
+  },
   statIcon: {
-    width: 38,
-    height: 38,
+    width: 34,
+    height: 34,
     borderRadius: 10,
-    background: "var(--accent-soft)",
-    color: "var(--accent)",
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
   },
   statValue: {
-    fontSize: 32,
-    fontWeight: 300,
+    fontSize: 28,
+    fontWeight: 400,
     lineHeight: 1,
     letterSpacing: "-0.02em",
     fontVariantNumeric: "tabular-nums",
     color: "var(--text)",
   },
-  statLabel: { fontSize: 13, color: "var(--muted)", marginTop: 9 },
+  statLabel: { fontSize: 13, color: "var(--text-2)", fontWeight: 500 },
+  statNote: { fontSize: 12, color: "var(--muted)", marginTop: 4 },
 
-  section: { marginTop: 34 },
+  section: { marginTop: 30 },
   sectionHead: {
     display: "flex",
     alignItems: "center",
@@ -340,20 +502,21 @@ const S = {
 
   card: {
     background: "var(--panel)",
-    border: "1px solid var(--line)",
-    borderRadius: "var(--r-card)",
+    border: "1px solid var(--line-soft)",
+    borderRadius: 14,
     boxShadow: "0 1px 2px rgba(17,24,39,.04)",
     overflowX: "auto",
   },
   cardEmpty: { padding: "40px 24px", textAlign: "center" },
   mutedText: { color: "var(--muted)", fontSize: 14 },
-  subtabs: { display: "flex", gap: 4, marginBottom: 12 },
+  subtabs: { display: "flex", gap: 4, marginBottom: 14 },
   subtab: {
     fontSize: 13,
     color: "var(--muted)",
     textDecoration: "none",
-    padding: "6px 12px",
+    padding: "7px 14px",
     borderRadius: 999,
+    transition: "color .14s ease",
   },
   subtabOn: {
     fontSize: 13,
@@ -361,7 +524,7 @@ const S = {
     color: "var(--accent)",
     background: "var(--accent-soft)",
     textDecoration: "none",
-    padding: "6px 12px",
+    padding: "7px 14px",
     borderRadius: 999,
   },
   orgMarkOff: {

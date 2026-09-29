@@ -6,47 +6,52 @@ import { FileIcon } from "../files/file-icon";
 
 // Must line up with the TARGETS map in the convert route.
 const CONVERSIONS = {
-  docx: [{ to: "pdf", label: "PDF" }],
+  docx: [{ to: "pdf", label: "PDF", note: "Fixed layout, opens anywhere." }],
   doc: [
-    { to: "pdf", label: "PDF" },
-    { to: "docx", label: "Word (.docx)" },
+    { to: "docx", label: "Word (.docx)", note: "Modern Word format." },
+    { to: "pdf", label: "PDF", note: "Fixed layout, opens anywhere." },
   ],
   odt: [
-    { to: "pdf", label: "PDF" },
-    { to: "docx", label: "Word (.docx)" },
+    { to: "docx", label: "Word (.docx)", note: "Modern Word format." },
+    { to: "pdf", label: "PDF", note: "Fixed layout, opens anywhere." },
   ],
   xlsx: [
-    { to: "csv", label: "CSV (first sheet)" },
-    { to: "pdf", label: "PDF" },
+    { to: "pdf", label: "PDF", note: "Fixed layout, opens anywhere." },
+    { to: "csv", label: "CSV", note: "First sheet only. Formulas are lost." },
   ],
   xls: [
-    { to: "csv", label: "CSV (first sheet)" },
-    { to: "pdf", label: "PDF" },
-    { to: "xlsx", label: "Excel (.xlsx)" },
+    { to: "xlsx", label: "Excel (.xlsx)", note: "Modern Excel format." },
+    { to: "pdf", label: "PDF", note: "Fixed layout, opens anywhere." },
+    { to: "csv", label: "CSV", note: "First sheet only. Formulas are lost." },
   ],
   csv: [
-    { to: "xlsx", label: "Excel (.xlsx)" },
-    { to: "pdf", label: "PDF" },
+    {
+      to: "xlsx",
+      label: "Excel (.xlsx)",
+      note: "Adds formatting and formulas.",
+    },
+    { to: "pdf", label: "PDF", note: "Fixed layout, opens anywhere." },
   ],
-  pptx: [{ to: "pdf", label: "PDF" }],
+  pptx: [{ to: "pdf", label: "PDF", note: "One page per slide." }],
   ppt: [
-    { to: "pdf", label: "PDF" },
-    { to: "pptx", label: "PowerPoint (.pptx)" },
+    {
+      to: "pptx",
+      label: "PowerPoint (.pptx)",
+      note: "Modern PowerPoint format.",
+    },
+    { to: "pdf", label: "PDF", note: "One page per slide." },
   ],
-  pdf: [{ to: "docx", label: "Word — editable (best effort)" }],
+  pdf: [
+    {
+      to: "docx",
+      label: "Word (.docx)",
+      note: "Best effort — expect to tidy up spacing and images.",
+    },
+  ],
 };
 
 const ACCEPT = ".docx,.doc,.odt,.xlsx,.xls,.csv,.pptx,.ppt,.pdf";
-
-/** Conversions worth warning about before someone waits on them. */
-const CAVEATS = {
-  "pdf>docx":
-    "Layout from a PDF rarely survives perfectly. Expect to tidy up spacing and images.",
-  "xlsx>csv":
-    "CSV holds one sheet and no formulas — only the first sheet is kept.",
-  "xls>csv":
-    "CSV holds one sheet and no formulas — only the first sheet is kept.",
-};
+const STEPS = ["Source", "File", "Format"];
 
 function fmtSize(bytes) {
   if (bytes == null) return "";
@@ -62,29 +67,40 @@ function extOf(name) {
 }
 
 export default function ConvertClient({ files, companies }) {
-  const [mode, setMode] = useState("drive");
+  // One screen at a time: source -> file -> format -> done. Every screen
+  // except the first has a Back button, so nothing is a dead end.
+  const [step, setStep] = useState("source");
+  const [mode, setMode] = useState(null); // 'drive' | 'upload'
+
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [uploadFile, setUploadFile] = useState(null);
   const [dragging, setDragging] = useState(false);
   const [companyId, setCompanyId] = useState(companies[0]?.id ?? "");
-  // Which target is currently running — lets the pressed button show its own
-  // spinner instead of every button going flat and grey together.
-  const [runningTo, setRunningTo] = useState(null);
+  const [target, setTarget] = useState(null);
+
+  const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const fileInputRef = useRef(null);
 
-  const busy = runningTo !== null;
-
   const selectedDrive = files.find((f) => f.id === selectedId) || null;
-  const driveExt = selectedDrive ? selectedDrive.extension.toLowerCase() : null;
-  const uploadExt = uploadFile ? extOf(uploadFile.name) : null;
-
-  const activeExt = mode === "drive" ? driveExt : uploadExt;
+  const activeExt =
+    mode === "drive"
+      ? (selectedDrive?.extension?.toLowerCase() ?? null)
+      : uploadFile
+        ? extOf(uploadFile.name)
+        : null;
   const targets = activeExt ? CONVERSIONS[activeExt] || [] : [];
-  const hasChoice =
-    mode === "drive" ? Boolean(selectedDrive) : Boolean(uploadFile);
+
+  const chosenName =
+    mode === "drive" ? selectedDrive?.name : (uploadFile?.name ?? null);
+  const chosenMeta =
+    mode === "drive"
+      ? selectedDrive?.company || "In your Drive"
+      : uploadFile
+        ? `${fmtSize(uploadFile.size)} · will be added to your Drive`
+        : "";
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -95,6 +111,38 @@ export default function ConvertClient({ files, companies }) {
         String(f.company).toLowerCase().includes(needle),
     );
   }, [files, query]);
+
+  // ---------------------------------------------------------- navigation
+
+  function goSource() {
+    setStep("source");
+    setMode(null);
+    setSelectedId(null);
+    setUploadFile(null);
+    setTarget(null);
+    setError("");
+    setQuery("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function pickMode(next) {
+    setMode(next);
+    setError("");
+    setStep("pick");
+  }
+
+  function backToPick() {
+    setTarget(null);
+    setError("");
+    setStep("pick");
+  }
+
+  function chooseDriveFile(id) {
+    setSelectedId(id);
+    setError("");
+    setTarget(null);
+    setStep("format");
+  }
 
   function chooseUpload(file) {
     if (!file) return;
@@ -108,30 +156,29 @@ export default function ConvertClient({ files, companies }) {
     }
     setError("");
     setUploadFile(file);
+    setTarget(null);
+    setStep("format");
   }
 
-  function onDrop(e) {
-    e.preventDefault();
-    setDragging(false);
-    chooseUpload(e.dataTransfer.files?.[0] ?? null);
-  }
-
-  async function run(to) {
-    setRunningTo(to);
-    setError("");
+  function startOver() {
     setResult(null);
+    goSource();
+  }
+
+  // -------------------------------------------------------------- action
+
+  async function convert() {
+    if (!target) return;
+    setRunning(true);
+    setError("");
+
     try {
       let fileId;
 
       if (mode === "upload") {
-        if (!uploadFile) {
-          setError("Choose a file to upload first.");
-          setRunningTo(null);
-          return;
-        }
         if (!companyId) {
           setError("Pick a company to upload into.");
-          setRunningTo(null);
+          setRunning(false);
           return;
         }
         const form = new FormData();
@@ -144,163 +191,141 @@ export default function ConvertClient({ files, companies }) {
         const upd = await up.json().catch(() => ({}));
         if (!up.ok) {
           setError(upd.error || "Could not upload that file.");
-          setRunningTo(null);
+          setRunning(false);
           return;
         }
         fileId = upd.id;
       } else {
-        if (!selectedId) {
-          setError("Select a file first.");
-          setRunningTo(null);
-          return;
-        }
         fileId = selectedId;
       }
 
       const res = await fetch(`/api/files/${fileId}/convert`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to }),
+        body: JSON.stringify({ to: target }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setResult({ id: data.id, name: data.name });
+        setStep("done");
       } else {
         setError(data.error || "Conversion failed.");
       }
     } catch {
       setError("Conversion failed.");
     }
-    setRunningTo(null);
+    setRunning(false);
   }
 
-  function reset() {
-    setResult(null);
-    setError("");
-    setSelectedId(null);
-    setUploadFile(null);
-    setQuery("");
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }
+  // -------------------------------------------------------------- render
 
-  function clearChoice() {
-    setSelectedId(null);
-    setUploadFile(null);
-    setError("");
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }
-
-  // ---------------------------------------------------------------- result
-
-  if (result) {
-    return (
-      <>
-        <Header />
-        <div style={S.resultCard}>
-          <div style={S.resultIcon}>
-            <FileIcon extension={extOf(result.name)} size={28} />
-          </div>
-          <div style={S.resultText}>
-            <p style={S.resultTitle}>Converted</p>
-            <p style={S.resultName}>{result.name}</p>
-            <p style={S.resultHint}>Saved to your Drive.</p>
-          </div>
-          <div style={S.resultActions}>
-            <Link href={`/edit/${result.id}`} style={S.btnPrimary}>
-              Open
-            </Link>
-            <a href={`/api/files/${result.id}/download`} style={S.btnGhost}>
-              Download
-            </a>
-            <button type="button" onClick={reset} style={S.btnGhost}>
-              Convert another
-            </button>
-          </div>
-        </div>
-      </>
-    );
-  }
-
-  // ----------------------------------------------------------------- form
+  const stepIndex =
+    step === "source" ? 0 : step === "pick" ? 1 : step === "format" ? 2 : 3;
 
   return (
     <>
       <style>{`
         .cv-row:hover { background: var(--bg); }
-        .cv-row-on:hover { background: var(--accent-soft); }
-        .cv-tab:hover { color: var(--text); }
-        .cv-choice:hover:not(:disabled) { filter: brightness(1.06); }
+        .cv-card:hover { border-color: var(--accent); background: var(--accent-soft); }
+        .cv-back:hover { color: var(--text); }
+        .cv-opt:hover { border-color: var(--accent); }
         .cv-ghost:hover { background: var(--bg); }
+        .cv-primary:hover:not(:disabled) { filter: brightness(1.06); }
         .cv-drop:hover { border-color: var(--accent); background: var(--accent-soft); }
         @keyframes cv-spin { to { transform: rotate(360deg); } }
         .cv-spin {
-          width: 14px; height: 14px; display: inline-block;
+          width: 15px; height: 15px; display: inline-block;
           border: 2px solid rgba(255,255,255,.45);
           border-top-color: #fff; border-radius: 999px;
           animation: cv-spin 620ms linear infinite;
         }
       `}</style>
 
-      <Header />
+      <header style={S.head}>
+        <p style={S.eyebrow}>Tools</p>
+        <h1 style={S.h1}>Convert</h1>
+        <p style={S.sub}>
+          Turn a document into another format. The converted copy is saved to
+          your Drive.
+        </p>
+      </header>
 
-      {/* ---------- Step 1 ---------- */}
-      <div style={S.stepHead}>
-        <span style={S.stepNum}>1</span>
-        <p style={S.stepLabel}>Choose a file</p>
-      </div>
+      {step !== "done" ? (
+        <ol style={S.crumbs}>
+          {STEPS.map((label, i) => (
+            <li key={label} style={S.crumbItem}>
+              <span
+                style={
+                  i === stepIndex
+                    ? S.crumbOn
+                    : i < stepIndex
+                      ? S.crumbDone
+                      : S.crumb
+                }
+              >
+                {label}
+              </span>
+              {i < STEPS.length - 1 ? <span style={S.crumbSep}>›</span> : null}
+            </li>
+          ))}
+        </ol>
+      ) : null}
 
-      {hasChoice ? (
-        // Once something is picked, collapse the picker down to a summary —
-        // scrolling back through 300 rows to check what you chose is a
-        // pointless bit of friction.
-        <div style={S.chosen}>
-          <FileIcon extension={activeExt} size={26} />
-          <span style={S.chosenText}>
-            <span style={S.chosenName}>
-              {mode === "drive" ? selectedDrive.name : uploadFile.name}
-            </span>
-            <span style={S.chosenMeta}>
-              {mode === "drive"
-                ? selectedDrive.company || "In your Drive"
-                : `${fmtSize(uploadFile.size)} · will be added to your Drive`}
-            </span>
-          </span>
+      {/* ------------------------------------------------ 1. source */}
+      {step === "source" ? (
+        <div style={S.cardRow}>
           <button
             type="button"
-            className="cv-ghost"
-            onClick={clearChoice}
-            disabled={busy}
-            style={S.btnGhost}
+            className="cv-card"
+            onClick={() => pickMode("drive")}
+            style={S.bigCard}
           >
-            Change
+            <svg
+              viewBox="0 0 24 24"
+              width="26"
+              height="26"
+              fill="currentColor"
+              style={S.bigIcon}
+            >
+              <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
+            </svg>
+            <span style={S.bigTitle}>From my Drive</span>
+            <span style={S.bigHint}>
+              Pick one of your {files.length} convertible{" "}
+              {files.length === 1 ? "file" : "files"}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            className="cv-card"
+            onClick={() => pickMode("upload")}
+            style={S.bigCard}
+            disabled={companies.length === 0}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="26"
+              height="26"
+              fill="currentColor"
+              style={S.bigIcon}
+            >
+              <path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z" />
+            </svg>
+            <span style={S.bigTitle}>Upload a file</span>
+            <span style={S.bigHint}>
+              {companies.length === 0
+                ? "You can't upload into any company"
+                : "From your computer"}
+            </span>
           </button>
         </div>
-      ) : (
+      ) : null}
+
+      {/* -------------------------------------------------- 2. file */}
+      {step === "pick" ? (
         <>
-          <div style={S.tabs}>
-            <button
-              type="button"
-              className="cv-tab"
-              onClick={() => {
-                setMode("drive");
-                setError("");
-              }}
-              style={mode === "drive" ? S.tabOn : S.tab}
-            >
-              From my Drive
-            </button>
-            <button
-              type="button"
-              className="cv-tab"
-              onClick={() => {
-                setMode("upload");
-                setError("");
-              }}
-              style={mode === "upload" ? S.tabOn : S.tab}
-            >
-              Upload a file
-            </button>
-          </div>
+          <BackButton onClick={goSource} label="Back to source" />
 
           {mode === "drive" ? (
             <div style={S.panel}>
@@ -322,6 +347,7 @@ export default function ConvertClient({ files, companies }) {
                   placeholder="Search your files"
                   style={S.searchInput}
                   aria-label="Search your files"
+                  autoFocus
                 />
                 {query ? (
                   <button
@@ -338,7 +364,7 @@ export default function ConvertClient({ files, companies }) {
               <p style={S.listCount}>
                 {query
                   ? `${filtered.length} of ${files.length} files`
-                  : `${files.length} convertible ${files.length === 1 ? "file" : "files"}`}
+                  : "Click a file to continue"}
               </p>
 
               <div style={S.list}>
@@ -354,15 +380,13 @@ export default function ConvertClient({ files, companies }) {
                       key={f.id}
                       type="button"
                       className="cv-row"
-                      onClick={() => {
-                        setSelectedId(f.id);
-                        setError("");
-                      }}
+                      onClick={() => chooseDriveFile(f.id)}
                       style={S.row}
                     >
                       <FileIcon extension={f.extension} size={22} />
                       <span style={S.rowName}>{f.name}</span>
                       <span style={S.rowCompany}>{f.company}</span>
+                      <span style={S.rowChevron}>›</span>
                     </button>
                   ))
                 )}
@@ -370,132 +394,175 @@ export default function ConvertClient({ files, companies }) {
             </div>
           ) : (
             <div style={S.panel}>
-              {companies.length === 0 ? (
-                <p style={S.muted}>
-                  You don’t have permission to upload into any company. Ask an
-                  admin, or use the “From my Drive” tab.
-                </p>
-              ) : (
+              {companies.length > 1 ? (
                 <>
-                  {companies.length > 1 ? (
-                    <>
-                      <label style={S.label} htmlFor="conv-co">
-                        Upload into
-                      </label>
-                      <select
-                        id="conv-co"
-                        value={companyId}
-                        onChange={(e) => setCompanyId(e.target.value)}
-                        style={S.select}
-                      >
-                        {companies.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))}
-                      </select>
-                    </>
-                  ) : null}
-
-                  <div
-                    className="cv-drop"
-                    onClick={() => fileInputRef.current?.click()}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      setDragging(true);
-                    }}
-                    onDragLeave={() => setDragging(false)}
-                    onDrop={onDrop}
-                    style={dragging ? S.dropOn : S.drop}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        fileInputRef.current?.click();
-                      }
-                    }}
+                  <label style={S.label} htmlFor="conv-co">
+                    Upload into
+                  </label>
+                  <select
+                    id="conv-co"
+                    value={companyId}
+                    onChange={(e) => setCompanyId(e.target.value)}
+                    style={S.select}
                   >
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="30"
-                      height="30"
-                      fill="currentColor"
-                      aria-hidden="true"
-                      style={S.dropIcon}
-                    >
-                      <path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z" />
-                    </svg>
-                    <p style={S.dropTitle}>
-                      Drop a file here, or click to browse
-                    </p>
-                    <p style={S.dropHint}>Word, Excel, PowerPoint or PDF</p>
-                  </div>
-
-                  <input
-                    ref={fileInputRef}
-                    id="conv-file"
-                    type="file"
-                    accept={ACCEPT}
-                    onChange={(e) => chooseUpload(e.target.files?.[0] ?? null)}
-                    style={{ display: "none" }}
-                  />
+                    {companies.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
                 </>
-              )}
+              ) : null}
+
+              <div
+                className="cv-drop"
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragging(true);
+                }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragging(false);
+                  chooseUpload(e.dataTransfer.files?.[0] ?? null);
+                }}
+                style={dragging ? S.dropOn : S.drop}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    fileInputRef.current?.click();
+                  }
+                }}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  width="30"
+                  height="30"
+                  fill="currentColor"
+                  aria-hidden="true"
+                  style={S.dropIcon}
+                >
+                  <path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z" />
+                </svg>
+                <p style={S.dropTitle}>Drop a file here, or click to browse</p>
+                <p style={S.dropHint}>Word, Excel, PowerPoint or PDF</p>
+              </div>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ACCEPT}
+                onChange={(e) => chooseUpload(e.target.files?.[0] ?? null)}
+                style={{ display: "none" }}
+              />
             </div>
           )}
         </>
-      )}
+      ) : null}
 
-      {/* ---------- Step 2 ---------- */}
-      <div style={hasChoice ? S.stepHead : S.stepHeadOff}>
-        <span style={hasChoice ? S.stepNum : S.stepNumOff}>2</span>
-        <p style={hasChoice ? S.stepLabel : S.stepLabelOff}>Convert to</p>
-      </div>
-
-      {!hasChoice ? (
-        <p style={S.muted}>
-          Pick a file above and the available formats appear here.
-        </p>
-      ) : targets.length === 0 ? (
-        <p style={S.muted}>This file type can’t be converted.</p>
-      ) : (
+      {/* ------------------------------------------------ 3. format */}
+      {step === "format" ? (
         <>
-          <div style={S.choices}>
-            {targets.map((t) => {
-              const running = runningTo === t.to;
-              return (
-                <button
-                  key={t.to}
-                  type="button"
-                  className="cv-choice"
-                  onClick={() => run(t.to)}
-                  disabled={busy}
-                  style={busy && !running ? S.choiceOff : S.choice}
-                >
-                  {running ? <span className="cv-spin" /> : null}
-                  {running ? "Converting…" : t.label}
-                </button>
-              );
-            })}
+          <BackButton
+            onClick={backToPick}
+            label={
+              mode === "drive"
+                ? "Choose a different file"
+                : "Choose a different file"
+            }
+            disabled={running}
+          />
+
+          <div style={S.chosen}>
+            <FileIcon extension={activeExt} size={26} />
+            <span style={S.chosenText}>
+              <span style={S.chosenName}>{chosenName}</span>
+              <span style={S.chosenMeta}>{chosenMeta}</span>
+            </span>
           </div>
 
-          {targets.map((t) => {
-            const note = CAVEATS[`${activeExt}>${t.to}`];
-            return note ? (
-              <p key={t.to} style={S.caveat}>
-                {note}
-              </p>
-            ) : null;
-          })}
-        </>
-      )}
+          <p style={S.formatLabel}>Convert it to</p>
 
-      {busy ? (
-        <p style={S.working}>
-          Working on it. Large files can take up to a minute — leaving this page
-          cancels it.
-        </p>
+          <div style={S.options}>
+            {targets.map((t) => (
+              <button
+                key={t.to}
+                type="button"
+                className="cv-opt"
+                onClick={() => setTarget(t.to)}
+                disabled={running}
+                style={target === t.to ? S.optOn : S.opt}
+              >
+                <span style={target === t.to ? S.radioOn : S.radio} />
+                <span style={S.optText}>
+                  <span style={S.optTitle}>{t.label}</span>
+                  <span style={S.optNote}>{t.note}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <div style={S.actions}>
+            <button
+              type="button"
+              className="cv-primary"
+              onClick={convert}
+              disabled={!target || running}
+              style={!target || running ? S.primaryOff : S.primary}
+            >
+              {running ? <span className="cv-spin" /> : null}
+              {running ? "Converting…" : "Convert"}
+            </button>
+            <button
+              type="button"
+              className="cv-ghost"
+              onClick={goSource}
+              disabled={running}
+              style={S.btnGhost}
+            >
+              Cancel
+            </button>
+          </div>
+
+          {running ? (
+            <p style={S.working}>
+              Large files can take up to a minute. Leaving this page cancels it.
+            </p>
+          ) : null}
+        </>
+      ) : null}
+
+      {/* --------------------------------------------------- 4. done */}
+      {step === "done" && result ? (
+        <div style={S.resultCard}>
+          <div style={S.resultIcon}>
+            <FileIcon extension={extOf(result.name)} size={28} />
+          </div>
+          <div style={S.resultText}>
+            <p style={S.resultTitle}>Converted</p>
+            <p style={S.resultName}>{result.name}</p>
+            <p style={S.resultHint}>Saved to your Drive.</p>
+          </div>
+          <div style={S.resultActions}>
+            <Link href={`/edit/${result.id}`} style={S.btnPrimaryLink}>
+              Open
+            </Link>
+            <a href={`/api/files/${result.id}/download`} style={S.btnGhost}>
+              Download
+            </a>
+            <button
+              type="button"
+              className="cv-ghost"
+              onClick={startOver}
+              style={S.btnGhost}
+            >
+              Convert another
+            </button>
+          </div>
+        </div>
       ) : null}
 
       {error ? (
@@ -507,16 +574,26 @@ export default function ConvertClient({ files, companies }) {
   );
 }
 
-function Header() {
+function BackButton({ onClick, label, disabled }) {
   return (
-    <header style={S.head}>
-      <p style={S.eyebrow}>Tools</p>
-      <h1 style={S.h1}>Convert</h1>
-      <p style={S.sub}>
-        Turn a document into another format. The converted copy is saved to your
-        Drive, ready to download.
-      </p>
-    </header>
+    <button
+      type="button"
+      className="cv-back"
+      onClick={onClick}
+      disabled={disabled}
+      style={S.back}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        width="16"
+        height="16"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
+      </svg>
+      {label}
+    </button>
   );
 }
 
@@ -524,7 +601,7 @@ const S = {
   head: {
     paddingBottom: 22,
     borderBottom: "1px solid var(--line-soft)",
-    marginBottom: 26,
+    marginBottom: 20,
   },
   eyebrow: {
     fontSize: 12,
@@ -548,77 +625,57 @@ const S = {
     maxWidth: 560,
   },
 
-  // Numbered steps, so the page reads as a sequence rather than two
-  // unrelated blocks with a gap between them.
-  stepHead: {
+  crumbs: {
     display: "flex",
     alignItems: "center",
-    gap: 10,
-    margin: "26px 0 12px",
+    gap: 8,
+    listStyle: "none",
+    marginBottom: 20,
+    padding: 0,
   },
-  stepHeadOff: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    margin: "26px 0 12px",
-    opacity: 0.55,
-  },
-  stepNum: {
-    width: 24,
-    height: 24,
-    borderRadius: 999,
-    background: "var(--accent)",
-    color: "#fff",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: 12,
-    fontWeight: 600,
-    flexShrink: 0,
-  },
-  stepNumOff: {
-    width: 24,
-    height: 24,
-    borderRadius: 999,
-    background: "var(--bg)",
-    color: "var(--muted)",
-    border: "1px solid var(--line)",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: 12,
-    fontWeight: 600,
-    flexShrink: 0,
-  },
-  stepLabel: { fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" },
-  stepLabelOff: { fontSize: 15, fontWeight: 600, color: "var(--muted)" },
+  crumbItem: { display: "inline-flex", alignItems: "center", gap: 8 },
+  crumb: { fontSize: 13, color: "var(--muted)" },
+  crumbDone: { fontSize: 13, color: "var(--accent)", fontWeight: 500 },
+  crumbOn: { fontSize: 13, color: "var(--text)", fontWeight: 600 },
+  crumbSep: { fontSize: 13, color: "var(--muted)" },
 
-  tabs: {
-    display: "flex",
+  back: {
+    display: "inline-flex",
+    alignItems: "center",
     gap: 4,
-    marginBottom: 16,
-    borderBottom: "1px solid var(--line)",
-  },
-  tab: {
-    padding: "10px 14px",
-    fontSize: 14,
+    marginBottom: 14,
+    padding: 0,
+    background: "none",
+    border: "none",
     color: "var(--muted)",
-    background: "none",
-    border: "none",
-    borderBottom: "3px solid transparent",
-    cursor: "pointer",
-    transition: "color .15s ease",
-  },
-  tabOn: {
-    padding: "10px 14px",
-    fontSize: 14,
+    fontSize: 13.5,
     fontWeight: 500,
-    color: "var(--accent)",
-    background: "none",
-    border: "none",
-    borderBottom: "3px solid var(--accent)",
     cursor: "pointer",
+    transition: "color .14s ease",
   },
+
+  cardRow: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))",
+    gap: 14,
+  },
+  bigCard: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 6,
+    padding: "24px 22px",
+    background: "var(--panel)",
+    border: "1px solid var(--line)",
+    borderRadius: "var(--r-card)",
+    cursor: "pointer",
+    textAlign: "left",
+    color: "var(--text)",
+    transition: "border-color .15s ease, background .15s ease",
+  },
+  bigIcon: { color: "var(--accent)", marginBottom: 6 },
+  bigTitle: { fontSize: 15, fontWeight: 600 },
+  bigHint: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 },
 
   panel: {
     background: "var(--panel)",
@@ -634,9 +691,8 @@ const S = {
     gap: 14,
     padding: "14px 18px",
     background: "var(--panel)",
-    border: "1px solid var(--accent)",
+    border: "1px solid var(--line)",
     borderRadius: "var(--r-card)",
-    boxShadow: "0 1px 2px rgba(17,24,39,.04)",
   },
   chosenText: {
     flex: 1,
@@ -653,6 +709,88 @@ const S = {
     textOverflow: "ellipsis",
   },
   chosenMeta: { fontSize: 12.5, color: "var(--muted)" },
+
+  formatLabel: {
+    fontSize: 12,
+    fontWeight: 600,
+    letterSpacing: ".06em",
+    textTransform: "uppercase",
+    color: "var(--muted)",
+    margin: "24px 0 10px",
+  },
+  options: { display: "flex", flexDirection: "column", gap: 8, maxWidth: 460 },
+  opt: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 12,
+    padding: "14px 16px",
+    background: "var(--panel)",
+    border: "1px solid var(--line)",
+    borderRadius: 10,
+    cursor: "pointer",
+    textAlign: "left",
+    transition: "border-color .14s ease",
+  },
+  optOn: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 12,
+    padding: "14px 16px",
+    background: "var(--accent-soft)",
+    border: "1px solid var(--accent)",
+    borderRadius: 10,
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  radio: {
+    width: 16,
+    height: 16,
+    borderRadius: 999,
+    border: "2px solid var(--line)",
+    marginTop: 2,
+    flexShrink: 0,
+  },
+  radioOn: {
+    width: 16,
+    height: 16,
+    borderRadius: 999,
+    border: "5px solid var(--accent)",
+    marginTop: 2,
+    flexShrink: 0,
+  },
+  optText: { display: "flex", flexDirection: "column", gap: 3, minWidth: 0 },
+  optTitle: { fontSize: 14, fontWeight: 500, color: "var(--text)" },
+  optNote: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.45 },
+
+  actions: { display: "flex", gap: 10, marginTop: 22, flexWrap: "wrap" },
+  primary: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 9,
+    padding: "12px 26px",
+    fontSize: 14.5,
+    fontWeight: 500,
+    cursor: "pointer",
+    background: "var(--accent)",
+    color: "#fff",
+    border: "none",
+    borderRadius: 10,
+    transition: "filter .12s ease",
+  },
+  primaryOff: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 9,
+    padding: "12px 26px",
+    fontSize: 14.5,
+    fontWeight: 500,
+    cursor: "default",
+    background: "var(--accent)",
+    color: "#fff",
+    border: "none",
+    borderRadius: 10,
+    opacity: 0.45,
+  },
 
   searchWrap: {
     display: "flex",
@@ -686,7 +824,7 @@ const S = {
   },
   listCount: { fontSize: 12, color: "var(--muted)", margin: "12px 2px 8px" },
   list: {
-    maxHeight: 360,
+    maxHeight: 380,
     overflowY: "auto",
     display: "flex",
     flexDirection: "column",
@@ -697,7 +835,7 @@ const S = {
     alignItems: "center",
     gap: 12,
     width: "100%",
-    padding: "10px 12px",
+    padding: "11px 12px",
     background: "none",
     border: "1px solid transparent",
     borderRadius: 8,
@@ -715,6 +853,7 @@ const S = {
     textOverflow: "ellipsis",
   },
   rowCompany: { fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" },
+  rowChevron: { fontSize: 16, color: "var(--muted)", flexShrink: 0 },
 
   label: {
     display: "block",
@@ -740,7 +879,7 @@ const S = {
     alignItems: "center",
     justifyContent: "center",
     gap: 4,
-    padding: "38px 20px",
+    padding: "44px 20px",
     border: "2px dashed var(--line)",
     borderRadius: "var(--r-card)",
     background: "var(--bg)",
@@ -754,7 +893,7 @@ const S = {
     alignItems: "center",
     justifyContent: "center",
     gap: 4,
-    padding: "38px 20px",
+    padding: "44px 20px",
     border: "2px dashed var(--accent)",
     borderRadius: "var(--r-card)",
     background: "var(--accent-soft)",
@@ -765,50 +904,15 @@ const S = {
   dropTitle: { fontSize: 14, fontWeight: 500, color: "var(--text)" },
   dropHint: { fontSize: 12.5, color: "var(--muted)" },
 
-  choices: { display: "flex", flexWrap: "wrap", gap: 10 },
-  choice: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 9,
-    padding: "11px 20px",
-    fontSize: 14,
-    fontWeight: 500,
-    cursor: "pointer",
-    background: "var(--accent)",
-    color: "#fff",
-    border: "none",
-    borderRadius: 8,
-    transition: "filter .12s ease",
-  },
-  choiceOff: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 9,
-    padding: "11px 20px",
-    fontSize: 14,
-    fontWeight: 500,
-    cursor: "default",
-    background: "var(--accent)",
-    color: "#fff",
-    border: "none",
-    borderRadius: 8,
-    opacity: 0.4,
-  },
-  caveat: {
-    fontSize: 12.5,
-    color: "var(--muted)",
-    marginTop: 12,
-    lineHeight: 1.5,
-    maxWidth: 560,
-  },
-  working: { fontSize: 13, color: "var(--muted)", marginTop: 16 },
+  working: { fontSize: 13, color: "var(--muted)", marginTop: 14 },
   error: {
     fontSize: 13,
     color: "var(--danger)",
     background: "var(--danger-soft)",
-    padding: "10px 14px",
-    borderRadius: "var(--r-card)",
+    padding: "11px 14px",
+    borderRadius: 10,
     marginTop: 16,
+    maxWidth: 560,
   },
   muted: { fontSize: 13, color: "var(--muted)", padding: "8px 0" },
 
@@ -848,7 +952,7 @@ const S = {
   },
   resultHint: { fontSize: 13, color: "var(--muted)", marginTop: 2 },
   resultActions: { display: "flex", gap: 8, flexWrap: "wrap" },
-  btnPrimary: {
+  btnPrimaryLink: {
     display: "inline-flex",
     alignItems: "center",
     padding: "9px 16px",

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useRef, useState } from "react";
 import AccessPanel from "./access-panel";
+import ConfirmDialog from "./confirm-dialog";
 import { FileIcon, FileTile, FolderIcon, FolderTile } from "./file-icon";
 import FileMenu from "./file-menu";
 import FolderDeleteButton from "./folder-delete-button";
@@ -56,8 +57,6 @@ export default function SelectableFiles({
   const router = useRouter();
   const [selected, setSelected] = useState(() => new Set());
   const [busy, setBusy] = useState(false);
-  const [draggingId, setDraggingId] = useState(null);
-  const [dropId, setDropId] = useState(null);
   const allRef = useRef(null);
 
   const selectableIds = files.filter((f) => f.canManage).map((f) => f.id);
@@ -101,16 +100,22 @@ export default function SelectableFiles({
     setSelected(allSelected ? new Set() : new Set(selectableIds));
   }
 
-  async function run(action) {
+  // The bulk purge is confirmed through the same dialog as everything else;
+  // `pending` holds the action until it's confirmed.
+  const [pending, setPending] = useState(null);
+
+  function ask(action) {
     if (selected.size === 0) return;
-    if (
-      action === "purge" &&
-      !window.confirm(
-        `Delete ${selected.size} file(s) forever? This cannot be undone.`,
-      )
-    ) {
+    // Restore is harmless and instant; the two destructive ones ask first.
+    if (action === "purge" || action === "trash") {
+      setPending(action);
       return;
     }
+    run(action);
+  }
+
+  async function run(action) {
+    if (selected.size === 0) return;
 
     setBusy(true);
     try {
@@ -121,6 +126,7 @@ export default function SelectableFiles({
       });
       if (res.ok) {
         setSelected(new Set());
+        setPending(null);
         router.refresh();
       } else {
         const data = await res.json().catch(() => ({}));
@@ -132,50 +138,10 @@ export default function SelectableFiles({
     setBusy(false);
   }
 
-  // --- drag and drop: move one file into a folder ---
-  async function moveFile(fileId, folderId) {
-    try {
-      const res = await fetch(`/api/files/${fileId}/move`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folderId: folderId ?? null }),
-      });
-      if (res.ok) {
-        router.refresh();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        window.alert(data.error || "Could not move the file.");
-      }
-    } catch {
-      window.alert("Could not move the file.");
-    }
-  }
-
-  function onDragStart(e, fileId) {
-    e.dataTransfer.setData("text/plain", fileId);
-    e.dataTransfer.effectAllowed = "move";
-    setDraggingId(fileId);
-  }
-
-  function onDragEnd() {
-    setDraggingId(null);
-    setDropId(null);
-  }
-
-  function onFolderDragOver(e, folderId) {
-    if (!draggingId) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    if (dropId !== folderId) setDropId(folderId);
-  }
-
-  function onFolderDrop(e, folderId) {
-    e.preventDefault();
-    const fileId = e.dataTransfer.getData("text/plain") || draggingId;
-    setDropId(null);
-    setDraggingId(null);
-    if (fileId) moveFile(fileId, folderId);
-  }
+  // Drag-to-folder was removed: `draggable` on the whole row meant any
+  // click-and-hold started a drag, which fought with selecting text and with
+  // inputs rendered inside the row. The ⋮ menu's "Move" does the same job
+  // predictably, and it's the only route on a touch screen anyway.
 
   const count = selected.size;
 
@@ -199,7 +165,7 @@ export default function SelectableFiles({
               <>
                 <button
                   type="button"
-                  onClick={() => run("restore")}
+                  onClick={() => ask("restore")}
                   disabled={busy}
                   style={S.action}
                 >
@@ -207,7 +173,7 @@ export default function SelectableFiles({
                 </button>
                 <button
                   type="button"
-                  onClick={() => run("purge")}
+                  onClick={() => ask("purge")}
                   disabled={busy}
                   style={S.actionDanger}
                 >
@@ -217,7 +183,7 @@ export default function SelectableFiles({
             ) : (
               <button
                 type="button"
-                onClick={() => run("trash")}
+                onClick={() => ask("trash")}
                 disabled={busy}
                 style={S.actionDanger}
               >
@@ -235,6 +201,34 @@ export default function SelectableFiles({
         ) : null}
       </div>
     ) : null;
+
+  const countLabel = `${count} ${count === 1 ? "file" : "files"}`;
+
+  const confirmDialog = pending ? (
+    pending === "purge" ? (
+      <ConfirmDialog
+        eyebrow="Delete forever"
+        title={countLabel}
+        message="This permanently removes them and every saved version. It cannot be undone."
+        confirmLabel="Delete forever"
+        danger
+        busy={busy}
+        onConfirm={() => run("purge")}
+        onClose={() => setPending(null)}
+      />
+    ) : (
+      <ConfirmDialog
+        eyebrow="Move to trash"
+        title={countLabel}
+        message="They move to the trash and stop appearing in the Drive. You can restore them from there."
+        confirmLabel="Move to trash"
+        danger
+        busy={busy}
+        onConfirm={() => run("trash")}
+        onClose={() => setPending(null)}
+      />
+    )
+  ) : null;
 
   if (folders.length === 0 && files.length === 0) {
     return (
@@ -260,23 +254,14 @@ export default function SelectableFiles({
 
   // ---- GRID ----
   function FileCard(f) {
-    const movable = view !== "trash" && f.canManage;
     return (
       <div
         key={f.id}
-        draggable={movable}
-        onDragStart={movable ? (e) => onDragStart(e, f.id) : undefined}
-        onDragEnd={onDragEnd}
-        style={{
-          ...(selected.has(f.id) ? { ...S.card, ...S.cardOn } : S.card),
-          ...(draggingId === f.id ? S.dragging : null),
-          cursor: movable ? "grab" : "default",
-        }}
+        style={selected.has(f.id) ? { ...S.card, ...S.cardOn } : S.card}
       >
         <Link
           href={view === "trash" ? "#" : `/edit/${f.id}`}
           style={S.cardLink}
-          draggable={false}
         >
           <FileTile extension={f.extension} />
           <div style={S.cardFoot}>
@@ -298,7 +283,7 @@ export default function SelectableFiles({
             f.canManage && (
               <span style={S.trashActions}>
                 <RestoreButton id={f.id} />
-                <PurgeButton id={f.id} />
+                <PurgeButton id={f.id} fileName={f.name} />
               </span>
             )
           ) : (
@@ -322,15 +307,10 @@ export default function SelectableFiles({
     return (
       <>
         {bar}
+        {confirmDialog}
         <div style={S.grid}>
           {folders.map((f) => (
-            <div
-              key={f.id}
-              style={dropId === f.id ? { ...S.card, ...S.dropCard } : S.card}
-              onDragOver={(e) => onFolderDragOver(e, f.id)}
-              onDragLeave={() => setDropId((c) => (c === f.id ? null : c))}
-              onDrop={(e) => onFolderDrop(e, f.id)}
-            >
+            <div key={f.id} style={S.card}>
               <Link href={`/files?folder=${f.id}`} style={S.cardLink}>
                 <FolderTile />
                 <div style={S.cardFoot}>
@@ -364,19 +344,8 @@ export default function SelectableFiles({
 
   // ---- LIST ----
   function FileRow(f) {
-    const movable = view !== "trash" && f.canManage;
     return (
-      <tr
-        key={f.id}
-        draggable={movable}
-        onDragStart={movable ? (e) => onDragStart(e, f.id) : undefined}
-        onDragEnd={onDragEnd}
-        style={{
-          ...(selected.has(f.id) ? S.rowOn : null),
-          ...(draggingId === f.id ? S.dragging : null),
-          cursor: movable ? "grab" : "default",
-        }}
-      >
+      <tr key={f.id} style={selected.has(f.id) ? S.rowOn : undefined}>
         <td style={S.tdBox}>
           <Box file={f} />
         </td>
@@ -387,7 +356,7 @@ export default function SelectableFiles({
               <span style={S.nameMuted}>{f.name}</span>
             </span>
           ) : (
-            <Link href={`/edit/${f.id}`} style={S.nameCell} draggable={false}>
+            <Link href={`/edit/${f.id}`} style={S.nameCell}>
               <FileIcon extension={f.extension} />
               <span style={S.name}>{f.name}</span>
             </Link>
@@ -405,7 +374,7 @@ export default function SelectableFiles({
             f.canManage ? (
               <span style={S.trashActions}>
                 <RestoreButton id={f.id} />
-                <PurgeButton id={f.id} />
+                <PurgeButton id={f.id} fileName={f.name} />
               </span>
             ) : (
               <span style={S.muted}>No access</span>
@@ -430,6 +399,7 @@ export default function SelectableFiles({
   return (
     <>
       {bar}
+      {confirmDialog}
       <div style={S.tableWrap}>
         <table style={S.table}>
           <thead>
@@ -445,13 +415,7 @@ export default function SelectableFiles({
           </thead>
           <tbody>
             {folders.map((f) => (
-              <tr
-                key={f.id}
-                onDragOver={(e) => onFolderDragOver(e, f.id)}
-                onDragLeave={() => setDropId((c) => (c === f.id ? null : c))}
-                onDrop={(e) => onFolderDrop(e, f.id)}
-                style={dropId === f.id ? S.rowDrop : null}
-              >
+              <tr key={f.id}>
                 <td style={S.tdBox} />
                 <td style={S.td}>
                   <Link href={`/files?folder=${f.id}`} style={S.nameCell}>
@@ -588,16 +552,14 @@ const S = {
     textDecoration: "none",
     color: "var(--text)",
   },
+  // Spread OVER S.card, so it repeats the whole `border` shorthand rather
+  // than just borderColor. Mixing the two means React has to remove
+  // borderColor while `border` is still set when a card is deselected — it
+  // warns about exactly that, and the border can render inconsistently.
   cardOn: {
-    borderColor: "var(--accent)",
+    border: "1px solid var(--accent)",
     boxShadow: "0 0 0 1px var(--accent)",
   },
-  dropCard: {
-    borderColor: "var(--accent)",
-    boxShadow: "0 0 0 2px var(--accent)",
-    background: "var(--accent-soft)",
-  },
-  dragging: { opacity: 0.45 },
   cardLink: { display: "block", textDecoration: "none", color: "var(--text)" },
   cardFoot: {
     display: "flex",
@@ -696,11 +658,6 @@ const S = {
     justifyContent: "flex-end",
   },
   rowOn: { background: "var(--accent-soft)" },
-  rowDrop: {
-    background: "var(--accent-soft)",
-    outline: "2px solid var(--accent)",
-    outlineOffset: "-2px",
-  },
   nameCell: {
     display: "flex",
     alignItems: "center",

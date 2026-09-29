@@ -1,8 +1,8 @@
-import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/db';
-import { getCurrentUser } from '@/lib/auth';
-import { resolveFilePermissions } from '@/lib/permissions';
-import { signPayload } from '@/lib/onlyoffice';
+import { getCurrentUser } from "@/lib/auth";
+import { prisma } from "@/lib/db";
+import { signPayload } from "@/lib/onlyoffice";
+import { resolveFilePermissions } from "@/lib/permissions";
+import { NextResponse } from "next/server";
 
 /**
  * Feeds OnlyOffice's own version-history panel.
@@ -14,33 +14,34 @@ export async function GET(req, { params }) {
   const { id } = await params;
 
   const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Sign in first.' }, { status: 401 });
+  if (!user)
+    return NextResponse.json({ error: "Sign in first." }, { status: 401 });
 
   const file = await prisma.file.findUnique({ where: { id } });
   if (!file || file.deletedAt) {
-    return NextResponse.json({ error: 'Not found.' }, { status: 404 });
+    return NextResponse.json({ error: "Not found." }, { status: 404 });
   }
 
   const permissions = await resolveFilePermissions(user, file);
   if (!permissions.canView) {
-    return NextResponse.json({ error: 'Not allowed.' }, { status: 403 });
+    return NextResponse.json({ error: "Not allowed." }, { status: 403 });
   }
 
   const versions = await prisma.fileVersion.findMany({
     where: { fileId: id },
-    orderBy: { version: 'asc' },
+    orderBy: { version: "asc" },
     include: { createdBy: { select: { id: true, name: true } } },
   });
 
   const internal = process.env.APP_INTERNAL_URL;
-  const wanted = req.nextUrl.searchParams.get('version');
+  const wanted = req.nextUrl.searchParams.get("version");
 
   // --- One version, with the data needed to highlight its changes ---
   if (wanted) {
     const n = Number(wanted);
     const current = versions.find((v) => v.version === n);
     if (!current) {
-      return NextResponse.json({ error: 'No such version.' }, { status: 404 });
+      return NextResponse.json({ error: "No such version." }, { status: 404 });
     }
 
     const previous = versions.find((v) => v.version === n - 1);
@@ -75,12 +76,12 @@ export async function GET(req, { params }) {
   return NextResponse.json({
     currentVersion: file.version,
     history: versions.map((v) => ({
-      created: v.createdAt.toISOString().slice(0, 19).replace('T', ' '),
+      created: v.createdAt.toISOString().slice(0, 19).replace("T", " "),
       key: `${file.id}-v${v.version}`,
       version: v.version,
       user: {
-        id: v.createdBy?.id ?? 'unknown',
-        name: v.createdBy?.name ?? 'Unknown',
+        id: v.createdBy?.id ?? "unknown",
+        name: v.createdBy?.name ?? "Unknown",
       },
       ...(v.changesSummary ? { changes: v.changesSummary } : {}),
       ...(v.serverVersion ? { serverVersion: v.serverVersion } : {}),

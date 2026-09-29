@@ -1,181 +1,230 @@
-'use client';
+"use client";
 
-import { useEffect, useRef } from 'react';
+import { LogoTile } from "@/components/logo";
+import { useEffect, useRef, useState } from "react";
 
-const CONTAINER_ID = 'atlas-shared-editor';
+/**
+ * The editor as an outside recipient sees it.
+ *
+ * This is the only page of Atlas most of them will ever look at, so the bar
+ * is the whole impression: the mark, what they're looking at, what they're
+ * allowed to do with it.
+ *
+ * Layout lives in real CSS rather than inline styles because it needs media
+ * queries — on a phone the filename has to give up its space rather than
+ * push the download button off the edge.
+ */
+const CSS = `
+.sv-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg);
+}
+.sv-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.sv-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  flex-shrink: 0;
+  text-decoration: none;
+  color: var(--text-2);
+}
+.sv-brand-name { font-size: 15px; font-weight: 500; letter-spacing: -0.01em; }
+.sv-rule {
+  width: 1px;
+  height: 22px;
+  background: var(--line);
+  flex-shrink: 0;
+}
+.sv-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sv-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 11px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.sv-badge-view { color: var(--text-2); background: var(--bg); }
+.sv-badge-edit { color: var(--accent); background: var(--accent-soft); }
+.sv-dl {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  height: 34px;
+  padding: 0 15px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 8px;
+  text-decoration: none;
+  transition: filter .12s ease;
+}
+.sv-dl:hover { filter: brightness(1.06); }
+.sv-frame {
+  flex: 1;
+  min-height: 0;
+  background: var(--panel);
+}
+.sv-frame > div { height: 100%; }
 
-export default function SharedViewer({ config, scriptUrl, fileName, canDownload, canEdit }) {
-  const editorRef = useRef(null);
+@media (max-width: 720px) {
+  /* dvh so the bar isn't hidden under a phone browser's collapsing chrome. */
+  .sv-wrap { height: 100dvh; }
+  .sv-bar { gap: 9px; padding: 9px 12px; }
+  /* The brand wordmark and the badge label are the first things to go —
+     the filename and the download button matter more on a small screen. */
+  .sv-brand-name, .sv-rule { display: none; }
+  .sv-badge span { display: none; }
+  .sv-badge { padding: 4px 7px; }
+  .sv-dl span { display: none; }
+  .sv-dl { padding: 0 11px; }
+}
+`;
+
+export default function SharedViewer({
+  config,
+  scriptUrl,
+  fileName,
+  canDownload,
+  canEdit,
+}) {
+  const holder = useRef(null);
+  const instance = useRef(null);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
 
-    function mount() {
+    function start() {
       if (cancelled || !window.DocsAPI) return;
-      try {
-        editorRef.current?.destroyEditor?.();
-      } catch {}
-      editorRef.current = new window.DocsAPI.DocEditor(CONTAINER_ID, config);
+      instance.current = new window.DocsAPI.DocEditor("atlas-shared", config);
     }
 
     if (window.DocsAPI) {
-      mount();
+      start();
     } else {
-      const existing = document.querySelector('script[data-onlyoffice-api]');
-      if (existing) {
-        existing.addEventListener('load', mount);
-      } else {
-        const s = document.createElement('script');
-        s.src = scriptUrl;
-        s.async = true;
-        s.setAttribute('data-onlyoffice-api', 'true');
-        s.onload = mount;
-        document.body.appendChild(s);
-      }
+      const script = document.createElement("script");
+      script.src = scriptUrl;
+      script.onload = start;
+      script.onerror = () => setError("Could not load the document viewer.");
+      document.body.appendChild(script);
     }
 
     return () => {
       cancelled = true;
       try {
-        editorRef.current?.destroyEditor?.();
-      } catch {}
-      editorRef.current = null;
+        if (instance.current && instance.current.destroyEditor) {
+          instance.current.destroyEditor();
+        }
+      } catch {
+        // Already gone; nothing to clean up.
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function download() {
-    try {
-      editorRef.current?.downloadAs?.();
-    } catch {}
-  }
+  }, [config, scriptUrl]);
 
   return (
-    <div style={S.page}>
-      <div style={S.bar}>
-        <span style={S.brand}>
-          <span style={S.mark} />
-          Atlas
+    <div className="sv-wrap">
+      <style>{CSS}</style>
+
+      <div className="sv-bar">
+        <span className="sv-brand">
+          <LogoTile size={26} />
+          <span className="sv-brand-name">Atlas</span>
         </span>
 
-        <span style={S.sep} />
+        <span className="sv-rule" />
 
-        <span style={S.fileWrap}>
-          <span style={S.fileName}>{fileName}</span>
+        <span className="sv-name" title={fileName}>
+          {fileName}
+        </span>
+
+        {/* Say what they can do, not just when it's editing — "no badge"
+            reads as an oversight rather than as view-only. */}
+        <span
+          className={
+            canEdit ? "sv-badge sv-badge-edit" : "sv-badge sv-badge-view"
+          }
+        >
           {canEdit ? (
-            <span style={S.pill}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-              </svg>
-              Can edit
-            </span>
+            <svg
+              viewBox="0 0 24 24"
+              width="13"
+              height="13"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" />
+            </svg>
           ) : (
-            <span style={S.pill}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-              View only
-            </span>
+            <svg
+              viewBox="0 0 24 24"
+              width="13"
+              height="13"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zm0 12.5a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z" />
+            </svg>
           )}
+          <span>{canEdit ? "Can edit" : "View only"}</span>
         </span>
-
-        <span style={S.spacer} />
 
         {canDownload ? (
-          <button type="button" onClick={download} style={S.download}>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M12 3v12M7 10l5 5 5-5M5 21h14" />
+          <a href={`/api/s/${config.document.key}/download`} className="sv-dl">
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
             </svg>
-            Download
-          </button>
+            <span>Download</span>
+          </a>
         ) : null}
       </div>
 
-      <div id={CONTAINER_ID} style={S.editor} />
+      {error ? (
+        <p style={S.error}>{error}</p>
+      ) : (
+        <div className="sv-frame">
+          <div id="atlas-shared" ref={holder} />
+        </div>
+      )}
     </div>
   );
 }
 
 const S = {
-  page: {
-    position: 'fixed',
-    inset: 0,
-    display: 'flex',
-    flexDirection: 'column',
-    background: 'var(--bg, #24272e)',
-  },
-  bar: {
-    flex: '0 0 auto',
-    height: 52,
-    display: 'flex',
-    alignItems: 'center',
-    gap: 14,
-    padding: '0 16px',
-    background: 'var(--panel, #101317)',
-    borderBottom: '0.5px solid var(--line, rgba(255,255,255,0.1))',
-  },
-  brand: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    color: 'var(--gold, #e7c675)',
-    fontWeight: 500,
+  error: {
+    color: "var(--danger)",
     fontSize: 14,
-    flex: '0 0 auto',
+    padding: 24,
+    margin: 0,
   },
-  mark: {
-    width: 16,
-    height: 16,
-    borderRadius: 4,
-    background: 'var(--gold, #e7c675)',
-    display: 'inline-block',
-  },
-  sep: {
-    width: '0.5px',
-    height: 22,
-    background: 'var(--line, rgba(255,255,255,0.14))',
-    flex: '0 0 auto',
-  },
-  fileWrap: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-    minWidth: 0,
-  },
-  fileName: {
-    color: 'var(--text, #f2f3f5)',
-    fontSize: 14,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-  pill: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 5,
-    background: 'rgba(231,198,117,0.14)',
-    color: 'var(--gold, #e7c675)',
-    fontSize: 11,
-    padding: '3px 9px',
-    borderRadius: 999,
-    whiteSpace: 'nowrap',
-    flex: '0 0 auto',
-  },
-  spacer: { flex: 1 },
-  download: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    background: 'transparent',
-    color: 'var(--gold, #e7c675)',
-    border: '0.5px solid rgba(231,198,117,0.5)',
-    borderRadius: 6,
-    padding: '7px 13px',
-    fontSize: 13,
-    fontWeight: 500,
-    cursor: 'pointer',
-    flex: '0 0 auto',
-  },
-  editor: { flex: '1 1 auto', minHeight: 0 },
 };

@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import TransferFilesDialog from "./transfer-files-dialog";
 
 const ROLES = [
   { value: "VIEWER", label: "Viewer" },
@@ -37,9 +38,10 @@ const MENU_CSS = `
 
 /**
  * Per-person actions in the admin table: disable/enable, reset password,
- * change role, and company membership. The menu is rendered through a portal
- * onto document.body so it can never be clipped by the table's overflow or a
- * transformed ancestor, and it clamps itself to stay fully on screen.
+ * change role, company membership, and transferring their files. The menu is
+ * rendered through a portal onto document.body so it can never be clipped by
+ * the table's overflow or a transformed ancestor, and it clamps itself to
+ * stay fully on screen.
  *
  * `companies` is the list this admin may act on for this person — each
  * { id, name, role }. `allCompanies` is every company this admin manages, used
@@ -197,7 +199,7 @@ export default function UserActions({
     setOpen(false);
     const ok = window.confirm(
       isActive
-        ? `Disable ${name}? They will be signed out immediately and cannot sign back in.`
+        ? `Disable ${name}? They will be signed out immediately and cannot sign back in. Transfer their files first — only an owner can delete a document permanently.`
         : `Enable ${name}? They will be able to sign in again.`,
     );
     if (!ok) return;
@@ -207,7 +209,7 @@ export default function UserActions({
   async function deleteAccount() {
     setOpen(false);
     const ok = window.confirm(
-      `Delete ${name}'s account? This cannot be undone. Their documents are kept but will no longer show a creator.`,
+      `Delete ${name}'s account? This cannot be undone. Their documents are kept but will no longer show a creator. Transfer their files first if anyone still needs to manage them.`,
     );
     if (!ok) return;
 
@@ -304,6 +306,18 @@ export default function UserActions({
                 Remove from company
               </button>
             ) : null}
+
+            {/* Sits above the danger block: it's the thing to do BEFORE
+                disabling or deleting someone, not after. */}
+            <button
+              type="button"
+              role="menuitem"
+              className="ua-item"
+              style={S.item}
+              onClick={() => openDialog("transfer")}
+            >
+              Transfer files
+            </button>
 
             {!isSelf ? (
               <>
@@ -408,6 +422,18 @@ export default function UserActions({
           error={error}
           setBusy={setBusy}
           setError={setError}
+          onCancel={() => setDialog(null)}
+          onDone={() => {
+            setDialog(null);
+            router.refresh();
+          }}
+        />
+      ) : null}
+
+      {dialog === "transfer" ? (
+        <TransferFilesDialog
+          name={name}
+          userId={userId}
           onCancel={() => setDialog(null)}
           onDone={() => {
             setDialog(null);

@@ -14,9 +14,16 @@ const MENU_CSS = `
 
 /**
  * Actions for a company sitting in the trash: restore it, or delete it
- * permanently (which wipes its contents and frees the name). Portalled menu.
+ * permanently.
+ *
+ * `companies` is the list of live companies, used by the "move them to
+ * another company" option. Without it that choice is hidden.
  */
-export default function CompanyTrashActions({ companyId, name }) {
+export default function CompanyTrashActions({
+  companyId,
+  name,
+  companies = [],
+}) {
   const router = useRouter();
   const trigger = useRef(null);
   const menuRef = useRef(null);
@@ -104,13 +111,18 @@ export default function CompanyTrashActions({ companyId, name }) {
     }
   }
 
-  async function purge(confirmName) {
+  async function purge({ confirmName, fileAction, targetCompanyId }) {
     setBusy(true);
     setError("");
     const res = await fetch(`/api/admin/companies/${companyId}`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ purge: true, confirmName }),
+      body: JSON.stringify({
+        purge: true,
+        confirmName,
+        fileAction,
+        ...(targetCompanyId ? { targetCompanyId } : {}),
+      }),
     });
     setBusy(false);
     if (res.ok) {
@@ -193,6 +205,7 @@ export default function CompanyTrashActions({ companyId, name }) {
       {dialog ? (
         <PurgeDialog
           name={name}
+          companies={companies}
           busy={busy}
           error={error}
           onCancel={() => setDialog(false)}
@@ -203,65 +216,202 @@ export default function CompanyTrashActions({ companyId, name }) {
   );
 }
 
-function PurgeDialog({ name, busy, error, onCancel, onConfirm }) {
+/**
+ * Two steps, deliberately.
+ *
+ * Step one is the decision that can't be undone — what happens to the
+ * documents. Step two is the typed-name confirmation. Putting a radio choice
+ * next to the confirm field would let someone type the name, click the button
+ * and destroy everything without ever having read the options.
+ */
+function PurgeDialog({ name, companies, busy, error, onCancel, onConfirm }) {
+  const [step, setStep] = useState("files");
+  const [fileAction, setFileAction] = useState("archive");
+  const [target, setTarget] = useState(companies[0]?.id ?? "");
   const [typed, setTyped] = useState("");
+
   const matches = typed.trim() === name;
+  const needsTarget = fileAction === "transfer";
+  const canContinue = !needsTarget || Boolean(target);
+
+  const CHOICES = [
+    {
+      key: "archive",
+      label: "Keep them in the archive",
+      note: "Documents move to a holding area only super admins can see. You can move them into another company later.",
+    },
+    {
+      key: "transfer",
+      label: "Move them to another company",
+      note: "They become ordinary documents there, visible to that company's admins and managers.",
+      disabled: companies.length === 0,
+      disabledNote: "No other company to move them to.",
+    },
+    {
+      key: "delete",
+      label: "Delete them too",
+      note: "Documents, folders and every saved version are erased from disk. Only a backup could bring them back.",
+      danger: true,
+    },
+  ];
+
+  const chosen = CHOICES.find((c) => c.key === fileAction);
 
   return (
-    <div style={M.backdrop} onClick={onCancel}>
+    <div style={M.backdrop} onClick={busy ? undefined : onCancel}>
       <div style={M.panel} onClick={(e) => e.stopPropagation()}>
+        <style>{`
+          .ct-choice { transition: border-color .14s ease, background .14s ease; }
+          .ct-choice:hover:not(:disabled) { border-color: var(--accent); }
+          .ct-choice:disabled { opacity: .5; cursor: default; }
+          .ct-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+        `}</style>
+
         <p className="eyebrow" style={{ ...M.eyebrow, color: "var(--danger)" }}>
           Delete permanently
         </p>
         <h3 style={M.title}>{name}</h3>
-        <p style={M.sub}>
-          This <strong>cannot be undone</strong>. It permanently erases {name}{" "}
-          and everything in it:
-        </p>
-        <ul style={M.list}>
-          <li>
-            all of its documents, folders, and file history — deleted from disk
-          </li>
-          <li>
-            everyone who belongs only to this company — their accounts are
-            deleted
-          </li>
-          <li>the company name and domain — freed so they can be used again</li>
-        </ul>
-        <p style={M.subSmall}>
-          People who also belong to another company are kept; they simply lose
-          access here.
-        </p>
 
-        <label style={M.label} htmlFor="purgename">
-          Type <strong style={{ color: "var(--text)" }}>{name}</strong> to
-          confirm
-        </label>
-        <input
-          id="purgename"
-          className="field"
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          placeholder={name}
-          autoFocus
-          autoComplete="off"
-        />
+        {step === "files" ? (
+          <>
+            <p style={M.sub}>
+              The company, its folders and everyone who belongs only to it will
+              be erased. First, decide what happens to its documents.
+            </p>
 
-        {error ? <p style={M.error}>{error}</p> : null}
+            <div style={M.choices}>
+              {CHOICES.map((c) => (
+                <button
+                  key={c.key}
+                  type="button"
+                  className="ct-choice"
+                  onClick={() => setFileAction(c.key)}
+                  disabled={c.disabled}
+                  style={fileAction === c.key ? M.choiceOn : M.choice}
+                >
+                  <span style={fileAction === c.key ? M.radioOn : M.radio} />
+                  <span style={M.choiceText}>
+                    <span
+                      style={c.danger ? M.choiceTitleDanger : M.choiceTitle}
+                    >
+                      {c.label}
+                    </span>
+                    <span style={M.choiceNote}>
+                      {c.disabled ? c.disabledNote : c.note}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
 
-        <div style={M.actions}>
-          <button type="button" className="btn btn-text" onClick={onCancel}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-danger"
-            disabled={busy || !matches}
-            onClick={() => onConfirm(typed.trim())}
-          >
-            {busy ? "Deleting" : "Delete permanently"}
-          </button>
-        </div>
+            {needsTarget ? (
+              <>
+                <label style={M.label} htmlFor="purgetarget">
+                  Move documents to
+                </label>
+                <select
+                  id="purgetarget"
+                  className="ct-select field"
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                  style={M.select}
+                >
+                  {companies.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <p style={M.subSmall}>
+                  Sharing set up inside {name} is dropped, and any outside links
+                  to these documents are revoked.
+                </p>
+              </>
+            ) : null}
+
+            <div style={M.actions}>
+              <button type="button" className="btn btn-text" onClick={onCancel}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={!canContinue}
+                onClick={() => setStep("confirm")}
+              >
+                Continue
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p style={M.sub}>
+              This <strong>cannot be undone</strong>. It permanently erases{" "}
+              {name}:
+            </p>
+            <ul style={M.list}>
+              <li>
+                {fileAction === "delete"
+                  ? "all of its documents, folders and file history — deleted from disk"
+                  : fileAction === "archive"
+                    ? "its documents are kept in the archive; its folders are not"
+                    : `its documents move to ${companies.find((c) => c.id === target)?.name ?? "the chosen company"}; its folders are not kept`}
+              </li>
+              <li>
+                everyone who belongs only to this company — their accounts are
+                deleted
+              </li>
+              <li>
+                the company name and domain — freed so they can be used again
+              </li>
+            </ul>
+            <p style={M.subSmall}>
+              People who also belong to another company are kept; they simply
+              lose access here.
+            </p>
+
+            <label style={M.label} htmlFor="purgename">
+              Type <strong style={{ color: "var(--text)" }}>{name}</strong> to
+              confirm
+            </label>
+            <input
+              id="purgename"
+              className="field"
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              placeholder={name}
+              autoFocus
+              autoComplete="off"
+            />
+
+            {error ? <p style={M.error}>{error}</p> : null}
+
+            <div style={M.actions}>
+              <button
+                type="button"
+                className="btn btn-text"
+                onClick={() => setStep("files")}
+                disabled={busy}
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={busy || !matches}
+                onClick={() =>
+                  onConfirm({
+                    confirmName: typed.trim(),
+                    fileAction,
+                    targetCompanyId: needsTarget ? target : null,
+                  })
+                }
+              >
+                {busy ? "Deleting" : "Delete permanently"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -333,15 +483,18 @@ const M = {
   },
   panel: {
     width: "100%",
-    maxWidth: 460,
+    maxWidth: 470,
     background: "var(--panel)",
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 26,
     boxShadow: "var(--shadow-raised)",
+    maxHeight: "88vh",
+    overflowY: "auto",
+    textAlign: "left",
   },
   eyebrow: { marginBottom: 6 },
-  title: { fontSize: 18, fontWeight: 500 },
-  sub: { fontSize: 13, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 },
+  title: { fontSize: 18, fontWeight: 600 },
+  sub: { fontSize: 13, color: "var(--muted)", marginTop: 8, lineHeight: 1.55 },
   subSmall: {
     fontSize: 12,
     color: "var(--muted)",
@@ -355,12 +508,65 @@ const M = {
     paddingLeft: 18,
     lineHeight: 1.6,
   },
+
+  choices: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    marginTop: 16,
+  },
+  choice: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 12,
+    padding: "13px 15px",
+    background: "var(--panel)",
+    border: "1px solid var(--line)",
+    borderRadius: 10,
+    cursor: "pointer",
+    textAlign: "left",
+    width: "100%",
+  },
+  choiceOn: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 12,
+    padding: "13px 15px",
+    background: "var(--accent-soft)",
+    border: "1px solid var(--accent)",
+    borderRadius: 10,
+    cursor: "pointer",
+    textAlign: "left",
+    width: "100%",
+  },
+  radio: {
+    width: 16,
+    height: 16,
+    borderRadius: 999,
+    border: "2px solid var(--line)",
+    marginTop: 2,
+    flexShrink: 0,
+  },
+  radioOn: {
+    width: 16,
+    height: 16,
+    borderRadius: 999,
+    border: "5px solid var(--accent)",
+    marginTop: 2,
+    flexShrink: 0,
+  },
+  choiceText: { display: "flex", flexDirection: "column", gap: 3, minWidth: 0 },
+  choiceTitle: { fontSize: 14, fontWeight: 500, color: "var(--text)" },
+  choiceTitleDanger: { fontSize: 14, fontWeight: 500, color: "var(--danger)" },
+  choiceNote: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.45 },
+
   label: {
     display: "block",
     fontSize: 13,
     color: "var(--muted)",
     margin: "18px 0 6px",
   },
+  select: { width: "100%", boxSizing: "border-box" },
   error: {
     fontSize: 13,
     color: "var(--danger)",

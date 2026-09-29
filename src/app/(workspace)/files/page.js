@@ -1,6 +1,6 @@
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/db";
-import { canOpenFolder, folderPath } from "@/lib/folders";
+import { canOpenFolder, folderPath, grantedFolderIds } from "@/lib/folders";
 import { visibleFilesWhere } from "@/lib/permissions";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -23,6 +23,17 @@ const TYPE_LABEL = {
   document: "Documents",
   presentation: "Presentations",
 };
+
+/**
+ * Files per page.
+ *
+ * Without a limit this page fetched every file the person could see on every
+ * load — Postgres sorting them all, Prisma building an object for each, the
+ * whole lot serialised into the RSC payload and rendered into the DOM. At a
+ * few hundred that is invisible; at ten thousand it is megabytes and tens of
+ * thousands of DOM nodes to show a dozen rows.
+ */
+const PAGE_SIZE = 20;
 
 /** What <input type="date"> sends: YYYY-MM-DD. Anything else is ignored. */
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -101,6 +112,10 @@ export default async function FilesPage({ searchParams }) {
   const to = DAY.test(params?.to ?? "") ? params.to : "";
   const vis = ["shared", "private"].includes(params?.vis) ? params.vis : "all";
 
+  // Anything unparseable is page 1 rather than an error — a hand-edited or
+  // stale URL should land somewhere sensible.
+  const requestedPage = Math.max(1, Number(params?.page) || 1);
+
   const createdAtFilter = dateFilter(range, from, to);
 
   const user = await getCurrentUser();
@@ -127,6 +142,49 @@ export default async function FilesPage({ searchParams }) {
     crumbs = await folderPath(folderId);
   }
 
+  const atRoot = view === "documents" && !flat && !folderId;
+
+  /**
+   * At the Drive root, show files that sit in a folder you cannot reach.
+   *
+   * Sharing a file grants nothing on its parent folder, so a file shared
+   * from inside someone else's folder used to be invisible in My Drive —
+   * it only appeared under "Shared with you", which people don't think to
+   * check. Surfacing it at the root puts it where they expect.
+   *
+   * Once the folder itself becomes reachable the file is visible in its
+   * real place, so this clause stops applying and it isn't listed twice.
+   *
+   * Admins and super admins reach every folder in their companies, so
+   * `notIn` matches nothing for them and behaviour is unchanged.
+   */
+  let rootFolderClause = { folderId: null };
+
+  if (atRoot && !user.isSuperAdmin) {
+    const reachable = await grantedFolderIds(user);
+
+    // Folders in companies this person runs are reachable too — those never
+    // go through grantedFolderIds, which only tracks grants and authorship.
+    const runsCompanyIds = user.memberships
+      .filter((m) => m.role === "ADMIN" || m.role === "MANAGER")
+      .map((m) => m.companyId);
+
+    rootFolderClause = {
+      OR: [
+        { folderId: null },
+        {
+          AND: [
+            { folderId: { not: null } },
+            { folderId: { notIn: reachable } },
+            runsCompanyIds.length
+              ? { companyId: { notIn: runsCompanyIds } }
+              : {},
+          ],
+        },
+      ],
+    };
+  }
+
   let where;
 
   if (view === "trash") {
@@ -140,7 +198,9 @@ export default async function FilesPage({ searchParams }) {
     // AND everything onto the base visibility rule — filters can only narrow,
     // never widen, what a user is allowed to see.
     const and = [base];
-    if (!flat) and.push({ folderId: folderId ?? null });
+    if (!flat) {
+      and.push(folderId ? { folderId } : rootFolderClause);
+    }
     if (type !== "all") and.push({ extension: { in: TYPE_EXTS[type] } });
     if (by) and.push({ uploadedById: by });
     if (createdAtFilter) and.push({ createdAt: createdAtFilter });
@@ -169,11 +229,25 @@ export default async function FilesPage({ searchParams }) {
 
   const showFolders = view === "documents" && !flat;
 
+  // How many match, so we can say "51–100 of 3,412" and know where the last
+  // page is. One extra COUNT query, which Postgres answers from the same
+  // index the page query uses.
+  const totalFiles = await prisma.file.count({ where });
+  const totalPages = Math.max(1, Math.ceil(totalFiles / PAGE_SIZE));
+
+  // A page number past the end (a bookmark from when there were more files,
+  // or a filter that has since narrowed) lands on the last real page rather
+  // than showing an empty list.
+  const page = Math.min(requestedPage, totalPages);
+  const skip = (page - 1) * PAGE_SIZE;
+
   const [files, trashCount, sharedCount, subfolders, creatorRows] =
     await Promise.all([
       prisma.file.findMany({
         where,
         orderBy,
+        skip,
+        take: PAGE_SIZE,
         include: { company: true, uploadedBy: { select: { name: true } } },
       }),
       prisma.file.count({ where: { ...base, deletedAt: { not: null } } }),
@@ -183,12 +257,19 @@ export default async function FilesPage({ searchParams }) {
           permissions: { some: { userId: user.id, canView: true } },
         },
       }),
-      showFolders
+      // Folders appear on the first page only. They are not paginated — there
+      // are rarely many — and repeating them above every page of files would
+      // be noise.
+      showFolders && page === 1
         ? prisma.folder.findMany({
             where: {
               parentId: folderId ?? null,
               deletedAt: null,
-              companyId: { in: companyIds },
+              // A super admin has no memberships, so companyIds is empty —
+              // and `in: []` matches nothing, which hid every folder from
+              // them. Files inside those folders were then only reachable
+              // through search, which drops the folder filter.
+              ...(user.isSuperAdmin ? {} : { companyId: { in: companyIds } }),
             },
             orderBy: { name: "asc" },
             include: { _count: { select: { files: true, children: true } } },
@@ -197,6 +278,11 @@ export default async function FilesPage({ searchParams }) {
       // Creators are taken from the files themselves, not from memberships.
       // A super admin has no memberships but sees every file, so a
       // membership-based list would come back empty for them.
+      //
+      // NOTE: this one is deliberately NOT paginated — it needs every
+      // distinct uploader to populate the filter. `distinct` keeps the result
+      // small but Postgres still walks the matching rows, so this is the next
+      // query to address as the library grows.
       prisma.file.findMany({
         where: { AND: [base, { deletedAt: null }] },
         distinct: ["uploadedById"],
@@ -231,7 +317,14 @@ export default async function FilesPage({ searchParams }) {
               ? folder.name
               : "My Drive";
 
-  // Keeps view, folder, type, search and sort when switching layout.
+  /**
+   * Rebuilds the query string, preserving every active filter.
+   *
+   * `next` optionally overrides one thing: "list"/"grid" for the layout
+   * toggle, or { page: n } for the pager. Everything else carries through, so
+   * paging never silently drops a filter and switching layout never jumps you
+   * back to page 1 of a different list.
+   */
   function url(next) {
     const s = new URLSearchParams();
     if (view !== "documents") s.set("view", view);
@@ -245,7 +338,13 @@ export default async function FilesPage({ searchParams }) {
     if (from) s.set("from", from);
     if (to) s.set("to", to);
     if (vis !== "all") s.set("vis", vis);
-    if (next === "grid") s.set("layout", "grid");
+
+    const wantLayout = next === "grid" || next === "list" ? next : layout;
+    if (wantLayout === "grid") s.set("layout", "grid");
+
+    const wantPage = next && typeof next === "object" ? next.page : page;
+    if (wantPage > 1) s.set("page", String(wantPage));
+
     const str = s.toString();
     return str ? `/files?${str}` : "/files";
   }
@@ -270,8 +369,6 @@ export default async function FilesPage({ searchParams }) {
         (m.role === "ADMIN" || m.role === "MANAGER"),
     );
   }
-
-  const empty = visibleFolders.length === 0 && files.length === 0;
 
   const plainFolders = visibleFolders.map((f) => ({
     id: f.id,
@@ -314,8 +411,16 @@ export default async function FilesPage({ searchParams }) {
   // Which kind "New" makes by default: the section you're standing in.
   const newType = type !== "all" ? type : "all";
 
+  const firstShown = totalFiles === 0 ? 0 : skip + 1;
+  const lastShown = skip + files.length;
+
   return (
     <>
+      <style>{`
+        .pg-link { transition: background .12s ease, border-color .12s ease; }
+        .pg-link:hover { background: var(--bg); border-color: var(--muted); }
+      `}</style>
+
       <div style={S.header}>
         <h1 style={S.h1}>{heading}</h1>
 
@@ -423,6 +528,88 @@ export default async function FilesPage({ searchParams }) {
         files={plainFiles}
         emptyText={emptyText}
       />
+
+      {/* Only worth showing once there is more than one page of anything. */}
+      {totalPages > 1 ? (
+        <nav style={S.pager} aria-label="Pages">
+          <span style={S.pagerCount}>
+            {firstShown.toLocaleString()}–{lastShown.toLocaleString()} of{" "}
+            {totalFiles.toLocaleString()}
+          </span>
+
+          <span style={S.pagerButtons}>
+            {page > 1 ? (
+              <Link
+                href={url({ page: page - 1 })}
+                className="pg-link"
+                style={S.pagerBtn}
+                rel="prev"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
+                </svg>
+                Previous
+              </Link>
+            ) : (
+              <span style={S.pagerBtnOff}>
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
+                </svg>
+                Previous
+              </span>
+            )}
+
+            <span style={S.pagerPage}>
+              Page {page} of {totalPages}
+            </span>
+
+            {page < totalPages ? (
+              <Link
+                href={url({ page: page + 1 })}
+                className="pg-link"
+                style={S.pagerBtn}
+                rel="next"
+              >
+                Next
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
+                </svg>
+              </Link>
+            ) : (
+              <span style={S.pagerBtnOff}>
+                Next
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
+                </svg>
+              </span>
+            )}
+          </span>
+        </nav>
+      ) : null}
     </>
   );
 }
@@ -481,6 +668,63 @@ const S = {
   crumb: { color: "var(--muted)", textDecoration: "none" },
   crumbNow: { color: "var(--text)", fontWeight: 500 },
   sep: { color: "var(--muted)", margin: "0 8px" },
+
+  pager: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 16,
+    flexWrap: "wrap",
+    marginTop: 22,
+    paddingTop: 18,
+    borderTop: "1px solid var(--line-soft)",
+  },
+  pagerCount: {
+    fontSize: 13,
+    color: "var(--muted)",
+    fontVariantNumeric: "tabular-nums",
+  },
+  pagerButtons: { display: "flex", alignItems: "center", gap: 8 },
+  pagerBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    height: 36,
+    padding: "0 14px",
+    background: "var(--panel)",
+    border: "1px solid var(--line)",
+    borderRadius: 8,
+    color: "var(--text-2)",
+    fontSize: 13,
+    fontWeight: 500,
+    textDecoration: "none",
+    whiteSpace: "nowrap",
+  },
+  // Rendered rather than hidden, so the pager doesn't shift as you move
+  // between the first and last pages.
+  pagerBtnOff: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    height: 36,
+    padding: "0 14px",
+    background: "transparent",
+    border: "1px solid var(--line-soft)",
+    borderRadius: 8,
+    color: "var(--muted)",
+    fontSize: 13,
+    fontWeight: 500,
+    whiteSpace: "nowrap",
+    opacity: 0.5,
+  },
+  pagerPage: {
+    fontSize: 13,
+    color: "var(--text-2)",
+    fontWeight: 500,
+    padding: "0 4px",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+  },
 
   empty: {
     marginTop: 20,

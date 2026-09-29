@@ -1,5 +1,5 @@
-import { prisma } from './db';
-import { grantedFolderIds } from './folders';
+import { prisma } from "./db";
+import { grantedFolderIds } from "./folders";
 
 const NONE = {
   canView: false,
@@ -8,6 +8,7 @@ const NONE = {
   canDownload: false,
   canPrint: false,
   canDelete: false,
+  canPurge: false,
 };
 
 const FULL = {
@@ -17,6 +18,7 @@ const FULL = {
   canDownload: true,
   canPrint: true,
   canDelete: true,
+  canPurge: true,
 };
 
 /**
@@ -33,14 +35,37 @@ const FULL = {
  *   7. Otherwise                -> nothing
  *
  * At each level a grant naming the person beats a grant naming the role.
+ *
+ * `canDelete` and `canPurge` are deliberately different powers:
+ *
+ *   canDelete -> move to trash. Recoverable, logged, visible in the Trash
+ *                tab. Admins keep this so a company can be tidied up and
+ *                a departed employee's files can be cleared away.
+ *
+ *   canPurge  -> destroy permanently. Only the person who created the file,
+ *                whoever they are. An admin cannot irreversibly delete
+ *                someone else's work, and neither can a super admin.
  */
 export async function resolveFilePermissions(user, file) {
+  const perms = await basePermissions(user, file);
+
+  // Applied last so it overrides every branch above, including the
+  // super-admin and company-admin shortcuts that return FULL.
+  perms.canPurge = perms.canView && file.uploadedById === user.id;
+
+  return perms;
+}
+
+async function basePermissions(user, file) {
   if (user.isSuperAdmin) return { ...FULL };
 
-  const membership = user.memberships.find((m) => m.companyId === file.companyId);
+  const membership = user.memberships.find(
+    (m) => m.companyId === file.companyId,
+  );
   if (!membership) return { ...NONE };
 
-  if (membership.role === 'ADMIN' || membership.role === 'MANAGER') return { ...FULL };
+  if (membership.role === "ADMIN" || membership.role === "MANAGER")
+    return { ...FULL };
 
   // You always control what you created.
   if (file.uploadedById === user.id) return { ...FULL };
@@ -86,10 +111,19 @@ export async function resolveFilePermissions(user, file) {
 
 /** A person-specific grant outranks a role grant at the same level. */
 function pick(grants, userId) {
-  return grants.find((g) => g.userId === userId) ?? grants.find((g) => g.role) ?? null;
+  return (
+    grants.find((g) => g.userId === userId) ??
+    grants.find((g) => g.role) ??
+    null
+  );
 }
 
-/** Copies a database row into a plain permissions object. */
+/**
+ * Copies a database row into a plain permissions object.
+ *
+ * There's no canPurge column — a shared grant never confers permanent
+ * deletion. resolveFilePermissions sets it from authorship instead.
+ */
 function strip(g) {
   return {
     canView: g.canView,
@@ -98,6 +132,7 @@ function strip(g) {
     canDownload: g.canDownload,
     canPrint: g.canPrint,
     canDelete: g.canDelete,
+    canPurge: false,
   };
 }
 
@@ -116,7 +151,7 @@ export async function visibleFilesWhere(user) {
   const clauses = [];
 
   for (const m of user.memberships) {
-    if (m.role === 'ADMIN' || m.role === 'MANAGER') {
+    if (m.role === "ADMIN" || m.role === "MANAGER") {
       // Runs the company: sees everything in it.
       clauses.push({ companyId: m.companyId });
     } else {
@@ -142,5 +177,5 @@ export async function visibleFilesWhere(user) {
 
   // An empty OR array matches everything in Prisma, which would undo
   // all of the above. The impossible clause keeps it closed.
-  return { deletedAt: null, OR: clauses.length ? clauses : [{ id: '' }] };
+  return { deletedAt: null, OR: clauses.length ? clauses : [{ id: "" }] };
 }

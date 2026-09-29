@@ -2,12 +2,18 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { FileIcon } from "./file-icon";
 import NameDialog from "./name-dialog";
 
+/**
+ * `ext` is only there to pick an icon — FileIcon works from an extension,
+ * and reusing it means these buttons can never drift from the marks in the
+ * file list and the sidebar.
+ */
 const KINDS = [
-  { key: "spreadsheet", label: "Spreadsheet" },
-  { key: "document", label: "Document" },
-  { key: "presentation", label: "Presentation" },
+  { key: "spreadsheet", label: "Spreadsheet", ext: "xlsx" },
+  { key: "document", label: "Document", ext: "docx" },
+  { key: "presentation", label: "Presentation", ext: "pptx" },
 ];
 
 export default function NewButtons({
@@ -56,16 +62,25 @@ export default function NewButtons({
     KINDS.find((k) => k.key === pending)?.label ?? "document";
 
   return (
-    <div style={{ display: "flex", gap: 8 }}>
+    <div style={S.row}>
+      <style>{`
+        .nm-btn { transition: background .12s ease, border-color .12s ease; }
+        .nm-btn:hover:not(:disabled) { background: var(--bg); border-color: var(--muted); }
+        .nm-btn:disabled { opacity: .55; cursor: default; }
+        .nm-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      `}</style>
+
       {kinds.map((k) => (
         <button
           key={k.key}
           type="button"
+          className="nm-btn"
           onClick={() => setPending(k.key)}
           disabled={busy !== ""}
           style={S.button}
         >
-          {busy === k.key ? "Working" : `New ${k.label}`}
+          <FileIcon extension={k.ext} size={18} />
+          {busy === k.key ? "Working…" : `New ${k.label}`}
         </button>
       ))}
 
@@ -86,13 +101,19 @@ export default function NewButtons({
 }
 
 const S = {
+  row: { display: "flex", gap: 8, flexWrap: "wrap" },
   button: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
     padding: "9px 14px",
     background: "transparent",
     color: "var(--text)",
     border: "1px solid var(--line)",
-    borderRadius: 3,
+    borderRadius: 8,
     fontSize: 13,
+    fontWeight: 500,
     cursor: "pointer",
+    whiteSpace: "nowrap",
   },
 };

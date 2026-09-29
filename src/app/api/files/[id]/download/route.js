@@ -1,10 +1,10 @@
-import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/db';
-import { readObject } from '@/lib/storage';
-import { verifyToken } from '@/lib/onlyoffice';
-import { getCurrentUser } from '@/lib/auth';
-import { resolveFilePermissions } from '@/lib/permissions';
-import { logActivity, ACTIONS } from '@/lib/activity';
+import { ACTIONS, logActivity } from "@/lib/activity";
+import { getCurrentUser } from "@/lib/auth";
+import { prisma } from "@/lib/db";
+import { verifyToken } from "@/lib/onlyoffice";
+import { resolveFilePermissions } from "@/lib/permissions";
+import { readObject } from "@/lib/storage";
+import { NextResponse } from "next/server";
 
 /**
  * Two very different callers reach this route:
@@ -18,12 +18,12 @@ import { logActivity, ACTIONS } from '@/lib/activity';
  */
 export async function GET(req, { params }) {
   const { id } = await params;
-  const token = req.nextUrl.searchParams.get('token');
-  const wanted = req.nextUrl.searchParams.get('version');
+  const token = req.nextUrl.searchParams.get("token");
+  const wanted = req.nextUrl.searchParams.get("version");
 
   const file = await prisma.file.findUnique({ where: { id } });
   if (!file || file.deletedAt) {
-    return NextResponse.json({ error: 'File not found.' }, { status: 404 });
+    return NextResponse.json({ error: "File not found." }, { status: 404 });
   }
 
   // --- Path 1: OnlyOffice, holding a signed token ---
@@ -32,11 +32,17 @@ export async function GET(req, { params }) {
     try {
       payload = await verifyToken(token);
     } catch {
-      return NextResponse.json({ error: 'Invalid or expired token.' }, { status: 401 });
+      return NextResponse.json(
+        { error: "Invalid or expired token." },
+        { status: 401 },
+      );
     }
 
     if (payload.fileId !== id) {
-      return NextResponse.json({ error: 'Token does not match this file.' }, { status: 403 });
+      return NextResponse.json(
+        { error: "Token does not match this file." },
+        { status: 403 },
+      );
     }
 
     // When showing version history, OnlyOffice asks for older versions
@@ -46,7 +52,10 @@ export async function GET(req, { params }) {
         where: { fileId: id, version: Number(wanted) },
       });
       if (!old) {
-        return NextResponse.json({ error: 'No such version.' }, { status: 404 });
+        return NextResponse.json(
+          { error: "No such version." },
+          { status: 404 },
+        );
       }
       return serve(file, await readObject(old.storageKey));
     }
@@ -57,12 +66,15 @@ export async function GET(req, { params }) {
   // --- Path 2: a person in a browser ---
   const user = await getCurrentUser();
   if (!user) {
-    return NextResponse.json({ error: 'Sign in first.' }, { status: 401 });
+    return NextResponse.json({ error: "Sign in first." }, { status: 401 });
   }
 
   const permissions = await resolveFilePermissions(user, file);
   if (!permissions.canDownload) {
-    return NextResponse.json({ error: 'You cannot download this file.' }, { status: 403 });
+    return NextResponse.json(
+      { error: "You cannot download this file." },
+      { status: 403 },
+    );
   }
 
   // Matching on fileId as well as version is essential — otherwise
@@ -75,7 +87,10 @@ export async function GET(req, { params }) {
       where: { fileId: id, version: Number(wanted) },
     });
     if (!v) {
-      return NextResponse.json({ error: 'That version does not exist.' }, { status: 404 });
+      return NextResponse.json(
+        { error: "That version does not exist." },
+        { status: 404 },
+      );
     }
     storageKey = v.storageKey;
     versionLabel = v.version;
@@ -96,9 +111,9 @@ export async function GET(req, { params }) {
 function serve(file, buffer) {
   return new NextResponse(buffer, {
     headers: {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
-      'Content-Length': String(buffer.length),
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+      "Content-Length": String(buffer.length),
     },
   });
 }

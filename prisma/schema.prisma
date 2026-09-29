@@ -4,7 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  
+
 }
 
 /// A tenant. Staff belong to one or more of these.
@@ -15,12 +15,16 @@ model Company {
   domain    String   @unique
   createdAt DateTime @default(now())
 
+  /// A holding area for documents from deleted companies. Not a real
+  /// tenant: it has no members, it never appears in the admin list or any
+  /// company picker, and only super admins can reach its files.
+  isArchive Boolean @default(false)
+
   memberships Membership[]
   folders     Folder[]
   files       File[]
   activities  Activity[]
-  deletedAt DateTime?
-  
+  deletedAt   DateTime?
 }
 
 model User {
@@ -85,11 +89,13 @@ model Folder {
 
 model File {
   id        String @id @default(cuid())
+
   companyId String
   folderId  String?
   name      String
   extension String
   size      Int    @default(0)
+
   /// Bumped on every save. Feeds the OnlyOffice document key.
   version      Int      @default(1)
   storageKey   String
@@ -97,6 +103,8 @@ model File {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   deletedAt    DateTime?
+
+  archivedFrom String?
 
   company     Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
   folder      Folder?       @relation(fields: [folderId], references: [id])
@@ -107,6 +115,12 @@ model File {
   shareLinks ShareLink[]
 
   @@index([companyId, folderId])
+  /// The Drive's default sort. Without this, pagination still makes Postgres
+  /// examine every matching row to decide which 20 come first.
+  @@index([updatedAt])
+  /// "What has this person created?" — profile page, admin user panel,
+  /// and the transfer-files count.
+  @@index([uploadedById])
 }
 
 model FileVersion {
@@ -150,6 +164,14 @@ model Permission {
   folder Folder? @relation(fields: [folderId], references: [id], onDelete: Cascade)
   file   File?   @relation(fields: [fileId], references: [id], onDelete: Cascade)
   user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Read on every permission resolution and had no index at all.
+  /// resolveFilePermissions queries by fileId, then again by folderId for
+  /// each level up the folder tree — five folders deep meant six full table
+  /// scans, per file, per request.
+  @@index([fileId])
+  @@index([folderId])
+  @@index([userId])
 }
 
 model Session {
@@ -162,6 +184,9 @@ model Session {
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// For clearing expired sessions — nothing does that yet, but it should.
+  @@index([expiresAt])
 }
 
 model ShareLink {
@@ -195,6 +220,10 @@ model Activity {
   detail    Json?
   ip        String?
   userAgent String?
+  /// The column exists in the database and nothing writes to it. It stays
+  /// declared here so the schema and the database agree — dropping it would
+  /// need a migration of its own, for no gain.
+  location  String?
   createdAt DateTime @default(now())
 
   company Company? @relation(fields: [companyId], references: [id])
@@ -202,8 +231,12 @@ model Activity {
   file    File?    @relation(fields: [fileId], references: [id])
 
   @@index([companyId, createdAt])
+  /// The one above serves an admin scoped to a company. It can't serve a
+  /// regular user's page, which filters on userId, nor a super admin's,
+  /// which sorts the whole table. This is the fastest-growing table here.
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  /// The login throttle counts LOGIN_FAILED rows in a time window on every
+  /// sign-in attempt.
+  @@index([action, createdAt])
 }
-
-
-
-

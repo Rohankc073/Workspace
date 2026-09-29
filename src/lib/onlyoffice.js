@@ -1,14 +1,14 @@
-import { SignJWT, jwtVerify } from 'jose';
-import { documentTypeFor } from './storage';
+import { SignJWT, jwtVerify } from "jose";
+import { documentTypeFor } from "./storage";
 
 const secret = new TextEncoder().encode(process.env.ONLYOFFICE_JWT_SECRET);
 
 /** Signs any object. OnlyOffice rejects unsigned requests when JWT is enabled. */
 export async function signPayload(payload) {
   return new SignJWT(payload)
-    .setProtectedHeader({ alg: 'HS256' })
+    .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime('4h')
+    .setExpirationTime("4h")
     .sign(secret);
 }
 
@@ -25,7 +25,12 @@ export async function verifyToken(token) {
  * the whole object is signed — a user editing the page source cannot
  * grant themselves edit rights.
  */
-export async function buildEditorConfig({ file, user, permissions, downloadToken }) {
+export async function buildEditorConfig({
+  file,
+  user,
+  permissions,
+  downloadToken,
+}) {
   const internal = process.env.APP_INTERNAL_URL;
 
   // Commenters need the editing interface but must not change content,
@@ -48,8 +53,8 @@ export async function buildEditorConfig({ file, user, permissions, downloadToken
     },
     documentType: documentTypeFor(file.extension),
     editorConfig: {
-      mode: interactive ? 'edit' : 'view',
-      lang: 'en',
+      mode: interactive ? "edit" : "view",
+      lang: "en",
       callbackUrl: `${internal}/api/onlyoffice/callback`,
       user: { id: user.id, name: user.name },
       customization: {

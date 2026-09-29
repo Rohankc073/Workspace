@@ -1,11 +1,39 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import ConfirmDialog from "./confirm-dialog";
 import MoveDialog from "./move-dialog";
 import ShareDialog from "./share-dialog";
 
+// Injected once, so the portalled menu can use :hover / :focus-visible and a
+// small open animation that inline styles can't express.
+const MENU_CSS = `
+.fm-menu { animation: fmMenuIn 120ms ease-out; }
+@keyframes fmMenuIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+.fm-menu .fm-item { transition: background 90ms ease; }
+.fm-menu .fm-item:hover,
+.fm-menu .fm-item:focus-visible {
+  background: rgba(0, 0, 0, 0.045);
+  outline: none;
+}
+.fm-menu .fm-item.fm-danger:hover,
+.fm-menu .fm-item.fm-danger:focus-visible { background: var(--danger-soft); }
+`;
+
+/**
+ * Row actions for one file.
+ *
+ * The menu is portalled onto document.body and positioned against the
+ * viewport. Previously it was absolutely positioned inside the table row,
+ * which meant the last rows on a page opened downward into nothing — "Share"
+ * and everything under it were cut off and unreachable. Same approach as
+ * UserActions in the admin table.
+ */
 export default function FileMenu({
   fileId,
   fileName,
@@ -14,8 +42,12 @@ export default function FileMenu({
   canMove,
 }) {
   const router = useRouter();
-  const wrap = useRef(null);
+  const trigger = useRef(null);
+  const menuRef = useRef(null);
+
+  const [mounted, setMounted] = useState(false);
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null);
   const [dialog, setDialog] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -24,9 +56,17 @@ export default function FileMenu({
   const baseName = lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
   const extension = lastDot > 0 ? fileName.slice(lastDot + 1) : "";
 
+  useEffect(() => setMounted(true), []);
+
+  // Close on outside click or Escape. The menu lives in the body now, so
+  // check both the trigger and the menu itself.
   useEffect(() => {
     function onDocClick(e) {
-      if (wrap.current && !wrap.current.contains(e.target)) setOpen(false);
+      const t = trigger.current;
+      const m = menuRef.current;
+      if (t && t.contains(e.target)) return;
+      if (m && m.contains(e.target)) return;
+      setOpen(false);
     }
     function onKey(e) {
       if (e.key === "Escape") setOpen(false);
@@ -38,6 +78,87 @@ export default function FileMenu({
       document.removeEventListener("keydown", onKey);
     };
   }, []);
+
+  // Place the menu against the viewport before paint, so there's no flicker.
+  // Prefers dropping down; opens upward when the row is near the bottom; pins
+  // to the edge if it's taller than either side.
+  useLayoutEffect(() => {
+    if (!open || !trigger.current || !menuRef.current) return;
+    const t = trigger.current.getBoundingClientRect();
+    const h = menuRef.current.offsetHeight;
+    const w = menuRef.current.offsetWidth;
+    const margin = 8;
+
+    const spaceBelow = window.innerHeight - t.bottom;
+    let top;
+    if (spaceBelow >= h + margin) {
+      top = t.bottom + 4;
+    } else if (t.top >= h + margin) {
+      top = t.top - 4 - h;
+    } else {
+      top = Math.max(margin, window.innerHeight - margin - h);
+    }
+
+    // Align the menu's right edge to the trigger's, then keep it on screen.
+    let right = window.innerWidth - t.right;
+    if (window.innerWidth - right - w < margin) {
+      right = window.innerWidth - w - margin;
+    }
+    if (right < margin) right = margin;
+
+    setPos({ top, right });
+  }, [open]);
+
+  // Move focus into the menu once it's placed, for keyboard users.
+  useEffect(() => {
+    if (!open || !pos || !menuRef.current) return;
+    const first = menuRef.current.querySelector(".fm-item");
+    if (first) first.focus();
+  }, [open, pos]);
+
+  // A fixed menu doesn't follow the page — close it if the user scrolls or
+  // resizes (scrolling inside the menu itself is exempt).
+  useEffect(() => {
+    if (!open) return;
+    function onScroll(e) {
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      setOpen(false);
+    }
+    function onResize() {
+      setOpen(false);
+    }
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [open]);
+
+  function onMenuKeyDown(e) {
+    if (!menuRef.current) return;
+    const items = Array.from(menuRef.current.querySelectorAll(".fm-item"));
+    if (items.length === 0) return;
+    const i = items.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      items[(i + 1) % items.length].focus();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      items[(i - 1 + items.length) % items.length].focus();
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      items[0].focus();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      items[items.length - 1].focus();
+    }
+  }
+
+  function choose(which) {
+    setOpen(false);
+    setDialog(which);
+  }
 
   async function confirmRemove() {
     setBusy(true);
@@ -53,68 +174,100 @@ export default function FileMenu({
     }
   }
 
-  /** Opens the confirmation. The actual transfer happens in confirmDownload. */
-  function download() {
-    setOpen(false);
-    setDialog("download");
-  }
-
   function confirmDownload() {
     setDialog(null);
     window.location.href = `/api/files/${fileId}/download`;
   }
 
-  /**
-   * Shared by both render branches below, so the Download item behaves the
-   * same whether or not the person has share/move/delete rights.
-   */
-  const downloadDialog =
-    dialog === "download" ? (
-      <ConfirmDialog
-        eyebrow="Download"
-        title={fileName}
-        message="This file will be saved to your device. Downloads are recorded in the activity log."
-        confirmLabel="Download"
-        onConfirm={confirmDownload}
-        onClose={() => setDialog(null)}
-      />
-    ) : null;
+  const menu =
+    open && mounted
+      ? createPortal(
+          <div
+            role="menu"
+            aria-label={`Actions for ${fileName}`}
+            ref={menuRef}
+            className="fm-menu"
+            onKeyDown={onMenuKeyDown}
+            style={{
+              ...S.menu,
+              ...(pos
+                ? { top: pos.top, right: pos.right, visibility: "visible" }
+                : { top: 0, right: 0, visibility: "hidden" }),
+            }}
+          >
+            <style>{MENU_CSS}</style>
 
-  const nothingToShow = !canShare && !canDelete && !canMove;
-  if (nothingToShow) {
-    return (
-      <div ref={wrap} style={S.wrap}>
-        <button
-          type="button"
-          style={S.trigger}
-          onClick={() => setOpen((v) => !v)}
-          aria-label={`Actions for ${fileName}`}
-        >
-          <Dots />
-        </button>
-        {open ? (
-          <div role="menu" style={S.menu}>
+            {canMove ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="fm-item"
+                style={S.item}
+                onClick={() => choose("move")}
+              >
+                Move
+              </button>
+            ) : null}
+
+            {canShare ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="fm-item"
+                style={S.item}
+                onClick={() => choose("share")}
+              >
+                Share
+              </button>
+            ) : null}
+
+            {canDelete ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="fm-item"
+                style={S.item}
+                onClick={() => choose("rename")}
+              >
+                Rename
+              </button>
+            ) : null}
+
             <button
               type="button"
               role="menuitem"
+              className="fm-item"
               style={S.item}
-              onClick={download}
+              onClick={() => choose("download")}
             >
               Download
             </button>
-          </div>
-        ) : null}
 
-        {downloadDialog}
-      </div>
-    );
-  }
+            {canDelete ? (
+              <>
+                <div style={S.divider} />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="fm-item fm-danger"
+                  style={S.itemDanger}
+                  onClick={() => choose("trash")}
+                >
+                  Move to trash
+                </button>
+              </>
+            ) : null}
+          </div>,
+          document.body,
+        )
+      : null;
 
   return (
-    <div ref={wrap} style={S.wrap}>
+    <div style={S.wrap}>
       <button
         type="button"
-        style={S.trigger}
+        ref={trigger}
+        style={{ ...S.trigger, ...(open ? S.triggerOpen : null) }}
         onClick={() => setOpen((v) => !v)}
         disabled={busy}
         aria-haspopup="menu"
@@ -124,77 +277,7 @@ export default function FileMenu({
         <Dots />
       </button>
 
-      {open ? (
-        <div role="menu" style={S.menu}>
-          {canMove ? (
-            <button
-              type="button"
-              role="menuitem"
-              style={S.item}
-              onClick={() => {
-                setOpen(false);
-                setDialog("move");
-              }}
-            >
-              Move
-            </button>
-          ) : null}
-
-          {canShare ? (
-            <button
-              type="button"
-              role="menuitem"
-              style={S.item}
-              onClick={() => {
-                setOpen(false);
-                setDialog("share");
-              }}
-            >
-              Share
-            </button>
-          ) : null}
-
-          {canDelete ? (
-            <button
-              type="button"
-              role="menuitem"
-              style={S.item}
-              onClick={() => {
-                setOpen(false);
-                setDialog("rename");
-              }}
-            >
-              Rename
-            </button>
-          ) : null}
-
-          <button
-            type="button"
-            role="menuitem"
-            style={S.item}
-            onClick={download}
-          >
-            Download
-          </button>
-
-          {canDelete ? (
-            <>
-              <div style={S.divider} />
-              <button
-                type="button"
-                role="menuitem"
-                style={S.itemDanger}
-                onClick={() => {
-                  setOpen(false);
-                  setDialog("trash");
-                }}
-              >
-                Move to trash
-              </button>
-            </>
-          ) : null}
-        </div>
-      ) : null}
+      {menu}
 
       {dialog === "share" ? (
         <ShareDialog
@@ -225,7 +308,16 @@ export default function FileMenu({
         />
       ) : null}
 
-      {downloadDialog}
+      {dialog === "download" ? (
+        <ConfirmDialog
+          eyebrow="Download"
+          title={fileName}
+          message="This file will be saved to your device. Downloads are recorded in the activity log."
+          confirmLabel="Download"
+          onConfirm={confirmDownload}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
 
       {dialog === "rename" ? (
         <RenameDialog
@@ -331,7 +423,8 @@ const R = {
     alignItems: "center",
     justifyContent: "center",
     padding: 24,
-    zIndex: 60,
+    // Above the portalled menu (1000), in case both are ever up at once.
+    zIndex: 1100,
   },
   panel: {
     width: "100%",
@@ -395,18 +488,22 @@ const S = {
     background: "none",
     color: "var(--muted)",
     cursor: "pointer",
+    transition: "background 90ms ease, color 90ms ease",
   },
+  triggerOpen: { background: "rgba(0, 0, 0, 0.06)", color: "var(--text)" },
   menu: {
-    position: "absolute",
-    top: "calc(100% + 4px)",
-    right: 0,
-    minWidth: 180,
+    // Fixed, not absolute: a menu inside the row is clipped by the table and
+    // can't escape the bottom of the page.
+    position: "fixed",
+    minWidth: 190,
     background: "var(--panel)",
     border: "1px solid var(--line-soft)",
     borderRadius: "var(--r-card)",
     boxShadow: "var(--shadow-raised)",
     padding: "6px 0",
-    zIndex: 40,
+    zIndex: 1000,
+    maxHeight: "calc(100vh - 16px)",
+    overflowY: "auto",
   },
   item: {
     display: "block",

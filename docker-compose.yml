@@ -20,7 +20,7 @@ services:
       - "8082:80"
     environment:
       JWT_ENABLED: "true"
-      JWT_SECRET: atlassecret456
+      JWT_SECRET: jZjatWuxGJSc8ACwPVxoGZzDF9Cih0/uwCUcMfO96dY=
     volumes:
       - atlas_oo_data:/var/www/onlyoffice/Data
       - atlas_oo_logs:/var/log/onlyoffice

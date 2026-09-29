@@ -1,24 +1,175 @@
 "use client";
 
-import ConfirmDialog from "@/app/(workspace)/files/confirm-dialog";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import BackButton from "./back-button";
 import FullscreenButton from "./fullscreen-button";
 
-export default function Editor({
-  config,
-  scriptUrl,
-  fileName,
-  badge,
-  fileId,
-  canDownload,
-}) {
+/**
+ * Layout lives in real CSS rather than inline styles because it needs media
+ * queries — inline styles can't express them, and the bar has to reflow on a
+ * phone: the filename was wrapping to four lines while the action buttons
+ * overflowed off the right edge.
+ */
+const CSS = `
+.ed-wrap {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 76px);
+}
+.ed-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 14px;
+  position: relative;
+  z-index: 10;
+}
+.ed-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ed-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.ed-action {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  padding: 6px 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .12s ease, color .12s ease;
+}
+.ed-action:hover:not(:disabled) { background: var(--bg); color: var(--text); }
+.ed-action:disabled { opacity: .6; cursor: default; }
+
+.ed-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 6px 9px;
+  background: transparent;
+  color: inherit;
+  border: 1px solid rgba(128,128,128,0.35);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.ed-back:disabled { cursor: default; }
+
+/* A quiet marker that there is still something in flight. */
+.ed-dirty {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #b06000;
+  white-space: nowrap;
+}
+.ed-dot {
+  width: 7px; height: 7px; border-radius: 999px;
+  background: #f4b400; flex-shrink: 0;
+  animation: ed-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ed-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes ed-spin { to { transform: rotate(360deg); } }
+.ed-spin {
+  width: 15px; height: 15px; flex-shrink: 0;
+  border: 2px solid rgba(128,128,128,.35);
+  border-top-color: currentColor;
+  border-radius: 999px;
+  animation: ed-spin 620ms linear infinite;
+}
+
+@media (max-width: 860px) {
+  /* dvh, so the bar doesn't sit under the browser's collapsing chrome. */
+  .ed-wrap { height: calc(100dvh - 96px); }
+  .ed-bar { flex-wrap: wrap; gap: 8px; padding-bottom: 10px; }
+  /* Actions drop to their own full-width row, so the filename gets the
+     whole first line to itself instead of wrapping around them. */
+  .ed-actions {
+    flex-basis: 100%;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .ed-action { padding: 7px 14px; font-size: 13px; }
+  .ed-dirty span { display: none; }
+}
+`;
+
+/** How long to wait for the editor to settle before letting someone go anyway. */
+const SETTLE_TIMEOUT_MS = 8000;
+
+/**
+ * Used when onDocumentStateChange never fires, so there is no signal to wait
+ * on. Long enough for the editor to push its changes to the document server,
+ * short enough not to feel broken.
+ */
+const BLIND_WAIT_MS = 0;
+
+/**
+ * NOTE: there is deliberately no Download button here.
+ *
+ * OnlyOffice writes the file only once it decides the editing session has
+ * ended, which can be seconds or minutes. A Download button in this bar reads
+ * from disk, so mid-edit it hands back the PREVIOUS version — it looked
+ * broken and wasn't. File → Download As inside the editor exports the live
+ * session, is always current, and still respects the `download` permission in
+ * the signed config.
+ */
+export default function Editor({ config, scriptUrl, fileName, badge, fileId }) {
+  const router = useRouter();
   const holder = useRef(null);
   const instance = useRef(null);
+
   const [error, setError] = useState("");
   const [showVersions, setShowVersions] = useState(false);
   const [Versions, setVersions] = useState(null);
-  const [confirmDownload, setConfirmDownload] = useState(false);
+
+  /**
+   * True while the editor has keystrokes it hasn't handed to the document
+   * server yet — the window in which leaving loses work.
+   *
+   * Kept in a ref as well as state: the beforeunload handler and the leave
+   * routine read it outside React's render cycle, where the state value would
+   * be whatever it was when the closure was created.
+   */
+  const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  const [leaving, setLeaving] = useState(false);
+
+  /**
+   * Whether onDocumentStateChange has EVER fired.
+   *
+   * It reliably does on some setups and apparently not on others — the same
+   * build behaves differently between a local dev server and the deployed
+   * one, and nothing in the console explains why. Rather than depend on it,
+   * this records whether the signal is trustworthy here: if it never fires,
+   * leaving falls back to a fixed pause instead of assuming the document is
+   * clean because a flag was never set.
+   */
+  const sawStateEvent = useRef(false);
+
+  function markDirty(value) {
+    sawStateEvent.current = true;
+    dirtyRef.current = value;
+    setDirty(value);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -26,6 +177,16 @@ export default function Editor({
     const withEvents = {
       ...config,
       events: {
+        /**
+         * Fires true the moment you type and false once the document server
+         * has the change — the same state behind the editor's own
+         * "All changes saved" line. This is the only reliable signal for
+         * whether it is safe to leave.
+         */
+        onDocumentStateChange: (event) => {
+          markDirty(Boolean(event?.data));
+        },
+
         onRequestHistory: async () => {
           try {
             const res = await fetch(`/api/files/${fileId}/history`);
@@ -92,6 +253,26 @@ export default function Editor({
     };
   }, [config, scriptUrl, fileId]);
 
+  /**
+   * Closing the tab or hitting the browser's back button skips our own
+   * button entirely, so the browser's native prompt is the only thing
+   * standing between an unsettled edit and losing it.
+   */
+  useEffect(() => {
+    function onBeforeUnload(e) {
+      // Without the event we cannot know, so warn rather than stay silent:
+      // a spurious prompt is a smaller cost than losing an edit.
+      if (sawStateEvent.current && !dirtyRef.current) return;
+      e.preventDefault();
+      // Modern browsers ignore the message and show their own wording; the
+      // returnValue is still required for the prompt to appear at all.
+      e.returnValue = "";
+      return "";
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
   async function openVersions() {
     if (!Versions) {
       const mod = await import("./history-panel");
@@ -100,39 +281,133 @@ export default function Editor({
     setShowVersions(true);
   }
 
-  /** Confirmed in the dialog; this is what actually starts the transfer. */
-  function startDownload() {
-    setConfirmDownload(false);
-    window.location.href = `/api/files/${fileId}/download`;
+  function navigateAway() {
+    // Return to the exact previous view (folder, type filter, search) when
+    // there's history; otherwise fall back to the Drive.
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      router.back();
+    } else {
+      router.push("/files");
+    }
+    // The previous view is served from the client cache, so re-fetch the
+    // server data. Deferred a tick so it runs after the navigation.
+    setTimeout(() => router.refresh(), 0);
+  }
+
+  /**
+   * Leave — but not while the editor still has changes in hand.
+   *
+   * Waits for onDocumentStateChange to report clean, which is normally under
+   * two seconds, so most of the time this is invisible. After
+   * SETTLE_TIMEOUT_MS it gives up and asks, rather than trapping someone in
+   * a document because something upstream is stuck.
+   */
+  async function goBack() {
+    if (leaving) return;
+
+    /**
+     * The event never fired, so the dirty flag means nothing — being false
+     * only tells us we were never told. Pause long enough for the editor to
+     * hand over whatever it is holding, then go.
+     *
+     * A guess at a duration rather than knowing, but it behaves the same
+     * everywhere, and it cannot interfere with saving the way commanding a
+     * force-save did.
+     */
+    if (!sawStateEvent.current) {
+      setLeaving(true);
+      await new Promise((r) => setTimeout(r, BLIND_WAIT_MS));
+      setLeaving(false);
+      navigateAway();
+      return;
+    }
+
+    if (!dirtyRef.current) {
+      navigateAway();
+      return;
+    }
+
+    setLeaving(true);
+
+    const settled = await new Promise((resolve) => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        if (!dirtyRef.current) {
+          clearInterval(timer);
+          resolve(true);
+        } else if (Date.now() - started > SETTLE_TIMEOUT_MS) {
+          clearInterval(timer);
+          resolve(false);
+        }
+      }, 150);
+    });
+
+    setLeaving(false);
+
+    if (settled) {
+      navigateAway();
+      return;
+    }
+
+    const ok = window.confirm(
+      "This document still has changes that haven't reached the server. Leaving now may lose them.\n\nLeave anyway?",
+    );
+    if (ok) navigateAway();
   }
 
   return (
-    <div style={S.wrap}>
-      <div style={S.bar}>
-        <BackButton />
-        <span style={S.name}>{fileName}</span>
-        {badge ? <span style={S.badge}>{badge}</span> : null}
+    <div className="ed-wrap">
+      <style>{CSS}</style>
 
-        <span style={S.spacer} />
-
-        <button type="button" onClick={openVersions} style={S.action}>
-          Versions
+      <div className="ed-bar">
+        <button
+          type="button"
+          className="ed-back"
+          onClick={goBack}
+          disabled={leaving}
+          title="Back to Drive"
+          aria-label="Back to Drive"
+        >
+          {leaving ? (
+            <span className="ed-spin" />
+          ) : (
+            <svg
+              viewBox="0 0 24 24"
+              width="18"
+              height="18"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" />
+            </svg>
+          )}
+          <span>{leaving ? "Saving…" : "Back"}</span>
         </button>
 
-        {canDownload ? (
-          <button
-            type="button"
-            onClick={() => setConfirmDownload(true)}
-            style={S.action}
-          >
-            Download
-          </button>
+        <span className="ed-name" title={fileName}>
+          {fileName}
+        </span>
+        {badge ? <span style={S.badge}>{badge}</span> : null}
+
+        {/* Visible while the editor still holds unsent changes, so the state
+            isn't only discoverable by trying to leave. */}
+        {dirty && !leaving ? (
+          <span className="ed-dirty">
+            <span className="ed-dot" />
+            <span>Saving changes…</span>
+          </span>
         ) : null}
 
-        {/* Maximize the stable OUTER wrapper (id=atlas-editor-frame), which
-            OnlyOffice never touches — the inner #atlas-editor div gets replaced
-            by an iframe and loses its id once the editor loads. */}
-        <FullscreenButton targetId="atlas-editor-frame" />
+        <div className="ed-actions">
+          <button type="button" onClick={openVersions} className="ed-action">
+            Versions
+          </button>
+
+          {/* Maximize the stable OUTER wrapper (id=atlas-editor-frame), which
+              OnlyOffice never touches — the inner #atlas-editor div gets replaced
+              by an iframe and loses its id once the editor loads. */}
+          <FullscreenButton targetId="atlas-editor-frame" />
+        </div>
       </div>
 
       {error ? (
@@ -146,59 +421,26 @@ export default function Editor({
       {showVersions && Versions ? (
         <Versions fileId={fileId} onClose={() => setShowVersions(false)} />
       ) : null}
-
-      {confirmDownload ? (
-        <ConfirmDialog
-          eyebrow="Download"
-          title={fileName}
-          message="This file will be saved to your device. Downloads are recorded in the activity log."
-          confirmLabel="Download"
-          onConfirm={startDownload}
-          onClose={() => setConfirmDownload(false)}
-        />
-      ) : null}
     </div>
   );
 }
 
 const S = {
-  wrap: {
-    display: "flex",
-    flexDirection: "column",
-    height: "calc(100vh - 76px)",
-  },
-  bar: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    paddingBottom: 14,
-    position: "relative",
-    zIndex: 10,
-  },
-  name: { fontSize: 14, fontWeight: 500 },
-  spacer: { marginLeft: "auto" },
   badge: {
     fontSize: 11,
     letterSpacing: "0.08em",
     textTransform: "uppercase",
     color: "var(--gold)",
     border: "1px solid var(--line)",
-    borderRadius: 2,
-    padding: "2px 7px",
-  },
-  action: {
-    background: "none",
-    border: "1px solid var(--line)",
     borderRadius: 3,
-    color: "var(--muted)",
-    fontSize: 12,
-    padding: "5px 12px",
-    cursor: "pointer",
+    padding: "2px 7px",
+    flexShrink: 0,
   },
   frame: {
     flex: 1,
+    minHeight: 0,
     border: "1px solid var(--line)",
-    borderRadius: 4,
+    borderRadius: 8,
     overflow: "hidden",
   },
   full: { height: "100%" },

@@ -1,35 +1,48 @@
-import { notFound, redirect } from 'next/navigation';
-import { prisma } from '@/lib/db';
-import { getCurrentUser } from '@/lib/auth';
-import { resolveFilePermissions } from '@/lib/permissions';
-import { buildEditorConfig, signPayload } from '@/lib/onlyoffice';
-import { documentTypeFor } from '@/lib/storage';
-import { logActivity, ACTIONS } from '@/lib/activity';
-import Editor from './editor';
+import { ACTIONS, logActivity } from "@/lib/activity";
+import { getCurrentUser } from "@/lib/auth";
+import { prisma } from "@/lib/db";
+import { buildEditorConfig, signPayload } from "@/lib/onlyoffice";
+import { resolveFilePermissions } from "@/lib/permissions";
+import { documentTypeFor } from "@/lib/storage";
+import { notFound, redirect } from "next/navigation";
+import Editor from "./editor";
 
 export default async function EditPage({ params }) {
   const { id } = await params;
 
   const user = await getCurrentUser();
-  if (!user) redirect('/login');
+  if (!user) redirect("/login");
 
   const file = await prisma.file.findUnique({ where: { id } });
   if (!file || file.deletedAt) notFound();
 
   const permissions = await resolveFilePermissions(user, file);
   if (!permissions.canView) {
-    return <p style={{ color: 'var(--muted)' }}>You do not have access to this document.</p>;
+    return (
+      <p style={{ color: "var(--muted)" }}>
+        You do not have access to this document.
+      </p>
+    );
   }
 
   if (!documentTypeFor(file.extension)) {
-    return <p style={{ color: 'var(--muted)' }}>This file type cannot be opened in the editor.</p>;
+    return (
+      <p style={{ color: "var(--muted)" }}>
+        This file type cannot be opened in the editor.
+      </p>
+    );
   }
 
   // Short-lived, names exactly one file, and is the only credential
   // the OnlyOffice container will have when it comes to fetch it.
   const downloadToken = await signPayload({ fileId: file.id });
 
-  const config = await buildEditorConfig({ file, user, permissions, downloadToken });
+  const config = await buildEditorConfig({
+    file,
+    user,
+    permissions,
+    downloadToken,
+  });
 
   await logActivity({
     action: ACTIONS.FILE_OPEN,
@@ -49,8 +62,8 @@ export default async function EditPage({ params }) {
         permissions.canEdit
           ? null
           : permissions.canComment
-            ? 'Comments only'
-            : 'View only'
+            ? "Comments only"
+            : "View only"
       }
     />
   );

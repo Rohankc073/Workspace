@@ -14,6 +14,9 @@ const ROLE_LABELS = {
   VIEWER: "Viewer",
 };
 
+/** Rows per page, matching the Drive. */
+const PAGE_SIZE = 20;
+
 function initials(name) {
   if (!name) return "?";
   return name
@@ -49,6 +52,14 @@ export default async function CompanyPeoplePage({ params, searchParams }) {
   const sp = await searchParams;
   const tab = sp?.tab === "documents" ? "documents" : "people";
 
+  /**
+   * The two tabs share a URL, so they need separate page numbers. With one
+   * `page` param, moving to page 3 of documents and then switching to People
+   * would land on page 3 of a list that may only have one.
+   */
+  const peoplePage = Math.max(1, Number(sp?.ppage) || 1);
+  const docsPage = Math.max(1, Number(sp?.dpage) || 1);
+
   const user = await getCurrentUser();
 
   const adminOf = user.memberships
@@ -77,20 +88,59 @@ export default async function CompanyPeoplePage({ params, searchParams }) {
     select: { id: true, name: true },
   });
 
-  const [people, files, fileCount, trashedCount] = await Promise.all([
-    prisma.user.findMany({
-      where: { memberships: { some: { companyId: id } } },
-      orderBy: { createdAt: "desc" },
-      include: { memberships: { include: { company: true } } },
-    }),
-    prisma.file.findMany({
-      where: { companyId: id },
-      orderBy: { createdAt: "desc" },
-      include: { uploadedBy: { select: { name: true } } },
-    }),
+  // Counts first: the headers and tabs need them whichever tab is open, and
+  // they decide how far the pagers go.
+  const [peopleTotal, docsTotal, fileCount, trashedCount] = await Promise.all([
+    prisma.user.count({ where: { memberships: { some: { companyId: id } } } }),
+    // Everything, trashed included — the Documents table lists both.
+    prisma.file.count({ where: { companyId: id } }),
     prisma.file.count({ where: { companyId: id, deletedAt: null } }),
     prisma.file.count({ where: { companyId: id, deletedAt: { not: null } } }),
   ]);
+
+  const peoplePages = Math.max(1, Math.ceil(peopleTotal / PAGE_SIZE));
+  const docsPages = Math.max(1, Math.ceil(docsTotal / PAGE_SIZE));
+
+  // A page past the end lands on the last real one rather than an empty list.
+  const pPage = Math.min(peoplePage, peoplePages);
+  const dPage = Math.min(docsPage, docsPages);
+
+  /**
+   * Only the visible tab is fetched. Before, both lists were loaded in full
+   * on every request — so opening People also pulled every document in the
+   * company, and vice versa.
+   */
+  const people =
+    tab === "people"
+      ? await prisma.user.findMany({
+          where: { memberships: { some: { companyId: id } } },
+          orderBy: { createdAt: "desc" },
+          skip: (pPage - 1) * PAGE_SIZE,
+          take: PAGE_SIZE,
+          include: { memberships: { include: { company: true } } },
+        })
+      : [];
+
+  const files =
+    tab === "documents"
+      ? await prisma.file.findMany({
+          where: { companyId: id },
+          orderBy: { createdAt: "desc" },
+          skip: (dPage - 1) * PAGE_SIZE,
+          take: PAGE_SIZE,
+          include: { uploadedBy: { select: { name: true } } },
+        })
+      : [];
+
+  /** Keeps the tab, changes only that tab's page number. */
+  function pageUrl(which, n) {
+    const s = new URLSearchParams();
+    if (tab === "documents") s.set("tab", "documents");
+    if (which === "people" && n > 1) s.set("ppage", String(n));
+    if (which === "documents" && n > 1) s.set("dpage", String(n));
+    const str = s.toString();
+    return str ? `/admin/companies/${id}?${str}` : `/admin/companies/${id}`;
+  }
 
   return (
     <>
@@ -102,6 +152,8 @@ export default async function CompanyPeoplePage({ params, searchParams }) {
         .doc-link { text-decoration: none; }
         .doc-link:hover span { text-decoration: underline; }
         .doc-dl:hover { background: var(--bg); color: var(--text); }
+        .pg-link { transition: background .12s ease, border-color .12s ease; }
+        .pg-link:hover { background: var(--bg); border-color: var(--muted); }
       `}</style>
 
       <header style={S.head}>
@@ -125,8 +177,8 @@ export default async function CompanyPeoplePage({ params, searchParams }) {
           <h1 style={S.h1}>{company.name}</h1>
         </div>
         <p style={S.sub}>
-          {company.domain} · {people.length}{" "}
-          {people.length === 1 ? "person" : "people"} · {fileCount}{" "}
+          {company.domain} · {peopleTotal}{" "}
+          {peopleTotal === 1 ? "person" : "people"} · {fileCount}{" "}
           {fileCount === 1 ? "document" : "documents"}
         </p>
       </header>
@@ -136,7 +188,7 @@ export default async function CompanyPeoplePage({ params, searchParams }) {
           href={`/admin/companies/${id}`}
           style={tab === "people" ? S.tabOn : S.tab}
         >
-          People <span style={S.tabCount}>{people.length}</span>
+          People <span style={S.tabCount}>{peopleTotal}</span>
         </Link>
         <Link
           href={`/admin/companies/${id}?tab=documents`}
@@ -147,17 +199,126 @@ export default async function CompanyPeoplePage({ params, searchParams }) {
       </div>
 
       {tab === "people" ? (
-        <PeopleTable
-          people={people}
-          user={user}
-          adminOf={adminOf}
-          manageable={manageable}
-          companyId={id}
-        />
+        <>
+          <PeopleTable
+            people={people}
+            user={user}
+            adminOf={adminOf}
+            manageable={manageable}
+            companyId={id}
+          />
+          <Pager
+            page={pPage}
+            totalPages={peoplePages}
+            total={peopleTotal}
+            shown={people.length}
+            skip={(pPage - 1) * PAGE_SIZE}
+            hrefFor={(n) => pageUrl("people", n)}
+          />
+        </>
       ) : (
-        <DocumentsTable files={files} trashedCount={trashedCount} />
+        <>
+          <DocumentsTable files={files} trashedCount={trashedCount} />
+          <Pager
+            page={dPage}
+            totalPages={docsPages}
+            total={docsTotal}
+            shown={files.length}
+            skip={(dPage - 1) * PAGE_SIZE}
+            hrefFor={(n) => pageUrl("documents", n)}
+          />
+        </>
       )}
     </>
+  );
+}
+
+/** Shared by both tabs; renders nothing when everything fits on one page. */
+function Pager({ page, totalPages, total, shown, skip, hrefFor }) {
+  if (totalPages <= 1) return null;
+
+  const first = total === 0 ? 0 : skip + 1;
+  const last = skip + shown;
+
+  return (
+    <nav style={S.pager} aria-label="Pages">
+      <span style={S.pagerCount}>
+        {first.toLocaleString()}–{last.toLocaleString()} of{" "}
+        {total.toLocaleString()}
+      </span>
+
+      <span style={S.pagerButtons}>
+        {page > 1 ? (
+          <Link
+            href={hrefFor(page - 1)}
+            className="pg-link"
+            style={S.pagerBtn}
+            rel="prev"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
+            </svg>
+            Previous
+          </Link>
+        ) : (
+          <span style={S.pagerBtnOff}>
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
+            </svg>
+            Previous
+          </span>
+        )}
+
+        <span style={S.pagerPage}>
+          Page {page} of {totalPages}
+        </span>
+
+        {page < totalPages ? (
+          <Link
+            href={hrefFor(page + 1)}
+            className="pg-link"
+            style={S.pagerBtn}
+            rel="next"
+          >
+            Next
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
+            </svg>
+          </Link>
+        ) : (
+          <span style={S.pagerBtnOff}>
+            Next
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
+            </svg>
+          </span>
+        )}
+      </span>
+    </nav>
   );
 }
 
@@ -505,6 +666,63 @@ const S = {
     background: "var(--bg)",
     padding: "3px 10px",
     borderRadius: 999,
+  },
+
+  pager: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 16,
+    flexWrap: "wrap",
+    marginTop: 18,
+    paddingTop: 16,
+    borderTop: "1px solid var(--line-soft)",
+  },
+  pagerCount: {
+    fontSize: 13,
+    color: "var(--muted)",
+    fontVariantNumeric: "tabular-nums",
+  },
+  pagerButtons: { display: "flex", alignItems: "center", gap: 8 },
+  pagerBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    height: 36,
+    padding: "0 14px",
+    background: "var(--panel)",
+    border: "1px solid var(--line)",
+    borderRadius: 8,
+    color: "var(--text-2)",
+    fontSize: 13,
+    fontWeight: 500,
+    textDecoration: "none",
+    whiteSpace: "nowrap",
+  },
+  // Rendered rather than hidden, so the pager doesn't shift as you move
+  // between the first and last pages.
+  pagerBtnOff: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    height: 36,
+    padding: "0 14px",
+    background: "transparent",
+    border: "1px solid var(--line-soft)",
+    borderRadius: 8,
+    color: "var(--muted)",
+    fontSize: 13,
+    fontWeight: 500,
+    whiteSpace: "nowrap",
+    opacity: 0.5,
+  },
+  pagerPage: {
+    fontSize: 13,
+    color: "var(--text-2)",
+    fontWeight: 500,
+    padding: "0 4px",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
   },
 
   empty: {

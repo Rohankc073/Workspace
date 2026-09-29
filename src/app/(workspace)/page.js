@@ -6,10 +6,8 @@ import Link from "next/link";
 import { FileIcon } from "./files/file-icon";
 
 /**
- * NOTE: these maps mirror the ones in activity/page.js. They had already
- * drifted — several actions were missing here and rendered as raw enum names
- * like FOLDER_DELETED. Kept in sync by hand for now; worth extracting to
- * lib/activity-labels.js if a third page ever needs them.
+ * NOTE: these maps mirror the ones in activity/page.js. Kept in sync by hand;
+ * worth extracting to lib/activity-labels.js if a third page needs them.
  */
 const LABELS = {
   LOGIN: "signed in",
@@ -72,6 +70,16 @@ const ICONS = {
     "M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z",
   clock:
     "M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
+  arrow: "M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
+};
+
+/** Icon tint per stat, so four identical blue chips stop looking like a row of one thing. */
+const TONES = {
+  blue: { bg: "rgba(26,115,232,.10)", fg: "#1a73e8" },
+  green: { bg: "rgba(15,157,88,.10)", fg: "#0f9d58" },
+  purple: { bg: "rgba(161,66,244,.10)", fg: "#a142f4" },
+  amber: { bg: "rgba(244,180,0,.14)", fg: "#b06000" },
+  red: { bg: "rgba(234,67,53,.10)", fg: "#ea4335" },
 };
 
 const AVATAR_TONES = [
@@ -103,10 +111,8 @@ export default async function DashboardPage() {
   } else if (oversees.length > 0) {
     activityWhere = { companyId: { in: oversees } };
   } else {
-    // Must match the scope in activity/page.js: a regular user sees their own
-    // actions, plus what others did to documents THEY created — never what an
-    // admin did, on any file. Two places computing this independently is how
-    // the old rule survived here after being fixed on the activity page.
+    // Must match the scope in activity/page.js: own actions, plus what others
+    // did to documents THEY created — never what an admin did.
     const myCompanyIds = user.memberships.map((m) => m.companyId);
 
     const privileged = await prisma.user.findMany({
@@ -150,6 +156,7 @@ export default async function DashboardPage() {
   const [
     recent,
     docCount,
+    weekCount,
     mineCount,
     sharedCount,
     activity,
@@ -167,6 +174,9 @@ export default async function DashboardPage() {
       include: { company: true },
     }),
     prisma.file.count({ where: fileWhere }),
+    // Context for the headline number: a count on its own says nothing about
+    // whether anything is actually happening.
+    prisma.file.count({ where: { ...fileWhere, createdAt: { gte: since } } }),
     prisma.file.count({ where: { ...fileWhere, uploadedById: user.id } }),
     prisma.permission.count({ where: { userId: user.id, canView: true } }),
     prisma.activity.findMany({
@@ -230,27 +240,42 @@ export default async function DashboardPage() {
     .slice(0, 8);
   const maxCompanyFiles = Math.max(1, ...companyRows.map((r) => r.files));
 
+  const weekNote =
+    weekCount > 0 ? `${weekCount} added this week` : "Nothing added this week";
+
   return (
     <>
       <style>{`
-        .metric { transition: transform .16s ease, box-shadow .16s ease; }
-        .metric:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(17,24,39,.08); }
+        .metric { transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
+        .metric:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 8px 24px rgba(17,24,39,.08);
+          border-color: var(--line);
+        }
         .hover-row { transition: background-color .12s ease; }
         .hover-row:hover { background: var(--bg); }
+        .hover-row .row-arrow { opacity: 0; transform: translateX(-4px); transition: all .14s ease; }
+        .hover-row:hover .row-arrow { opacity: 1; transform: none; }
         .quick { transition: background .14s ease, border-color .14s ease, transform .14s ease; }
         .quick:hover { background: var(--accent-soft); border-color: var(--accent); transform: translateY(-1px); }
         .quiet-link:hover { text-decoration: underline; }
       `}</style>
 
-      <header style={S.head}>
+      {/* A tinted band gives the greeting somewhere to sit — it was floating
+          in a lot of white with a hairline underneath. */}
+      <header style={S.hero}>
         <div style={S.headText}>
           <p style={S.eyebrow}>{today()}</p>
           <h1 style={S.h1}>
             {greeting()}, {firstName}
           </h1>
+          <p style={S.heroSub}>
+            {isOverseer
+              ? "Everything across the companies you manage."
+              : "Your documents and the ones shared with you."}
+          </p>
         </div>
 
-        {/* Somewhere to go next — the dashboard was previously read-only. */}
         <nav style={S.quickRow}>
           <Quick href="/files" icon="drive" label="Open Drive" />
           <Quick href="/convert" icon="convert" label="Convert" />
@@ -265,19 +290,33 @@ export default async function DashboardPage() {
         {isOverseer ? (
           <>
             {isSuper ? (
-              <Stat icon="company" value={companies} label="Companies" />
+              <Stat
+                icon="company"
+                tone="purple"
+                value={companies}
+                label="Companies"
+              />
             ) : null}
-            <Stat icon="people" value={people} label="People" />
-            <Stat icon="documents" value={docCount} label="Documents" />
+            <Stat icon="people" tone="green" value={people} label="People" />
+            <Stat
+              icon="documents"
+              tone="blue"
+              value={docCount}
+              label="Documents"
+              note={weekNote}
+            />
             <Stat
               icon="storage"
+              tone="purple"
               value={formatBytes(storageBytes)}
               label="Storage used"
             />
             <Stat
               icon="shield"
+              tone={failedLogins > 0 ? "red" : "green"}
               value={failedLogins}
-              label="Failed sign-ins this week"
+              label="Failed sign-ins"
+              note="Last 7 days"
               alert={failedLogins > 0}
             />
           </>
@@ -285,13 +324,26 @@ export default async function DashboardPage() {
           <>
             <Stat
               icon="documents"
+              tone="blue"
               value={docCount}
               label="Documents you can open"
+              note={weekNote}
             />
-            <Stat icon="mine" value={mineCount} label="Created by you" />
-            <Stat icon="shared" value={sharedCount} label="Shared with you" />
+            <Stat
+              icon="mine"
+              tone="green"
+              value={mineCount}
+              label="Created by you"
+            />
+            <Stat
+              icon="shared"
+              tone="amber"
+              value={sharedCount}
+              label="Shared with you"
+            />
             <Stat
               icon="storage"
+              tone="purple"
               value={formatBytes(storageBytes)}
               label="Storage used"
             />
@@ -325,13 +377,24 @@ export default async function DashboardPage() {
                     className="hover-row"
                     style={S.fileRow}
                   >
-                    <FileIcon extension={f.extension} size={26} />
+                    <FileIcon extension={f.extension} size={28} />
                     <span style={S.fileText}>
                       <span style={S.fileName}>{f.name}</span>
                       <span style={S.fileMeta}>
                         {f.company.name} · {timeAgo(f.updatedAt)}
                       </span>
                     </span>
+                    <svg
+                      className="row-arrow"
+                      viewBox="0 0 24 24"
+                      width="18"
+                      height="18"
+                      fill="currentColor"
+                      aria-hidden="true"
+                      style={S.rowArrow}
+                    >
+                      <path d={ICONS.arrow} />
+                    </svg>
                   </Link>
                 </li>
               ))}
@@ -479,26 +542,33 @@ function Empty({ icon, title, body, actionHref, actionLabel }) {
   );
 }
 
-function Stat({ icon, value, label, alert }) {
+function Stat({ icon, tone = "blue", value, label, note, alert }) {
+  const t = TONES[tone] ?? TONES.blue;
   return (
     <div className="metric" style={S.stat}>
-      <span style={{ ...S.statIcon, ...(alert ? S.statIconAlert : null) }}>
-        <svg
-          viewBox="0 0 24 24"
-          width="19"
-          height="19"
-          fill="currentColor"
-          aria-hidden="true"
+      <div style={S.statTop}>
+        <span style={{ ...S.statIcon, background: t.bg, color: t.fg }}>
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path d={ICONS[icon]} />
+          </svg>
+        </span>
+        <p
+          style={{
+            ...S.statValue,
+            ...(alert ? { color: "var(--danger)" } : null),
+          }}
         >
-          <path d={ICONS[icon]} />
-        </svg>
-      </span>
-      <div>
-        <p style={{ ...S.statValue, ...(alert ? S.statValueAlert : null) }}>
           {value ?? 0}
         </p>
-        <p style={S.statLabel}>{label}</p>
       </div>
+      <p style={S.statLabel}>{label}</p>
+      {note ? <p style={S.statNote}>{note}</p> : null}
     </div>
   );
 }
@@ -566,15 +636,18 @@ function formatBytes(n) {
 }
 
 const S = {
-  head: {
+  hero: {
     display: "flex",
     alignItems: "flex-end",
     justifyContent: "space-between",
     gap: 20,
     flexWrap: "wrap",
-    paddingBottom: 22,
-    borderBottom: "1px solid var(--line-soft)",
-    marginBottom: 26,
+    padding: "26px 28px",
+    marginBottom: 20,
+    borderRadius: 16,
+    background:
+      "linear-gradient(135deg, var(--accent-soft) 0%, rgba(161,66,244,.07) 55%, transparent 100%)",
+    border: "1px solid var(--line-soft)",
   },
   headText: { minWidth: 0 },
   eyebrow: {
@@ -591,6 +664,7 @@ const S = {
     letterSpacing: "-0.02em",
     color: "var(--text)",
   },
+  heroSub: { fontSize: 13.5, color: "var(--muted)", marginTop: 8 },
 
   quickRow: { display: "flex", gap: 8, flexWrap: "wrap" },
   quick: {
@@ -611,60 +685,68 @@ const S = {
 
   stats: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
-    gap: 16,
-    marginBottom: 24,
+    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+    gap: 14,
+    marginBottom: 16,
   },
   stat: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 20,
-    padding: "22px 22px 20px",
+    padding: "18px 20px 16px",
     background: "var(--panel)",
-    border: "1px solid var(--line)",
-    borderRadius: "var(--r-card)",
+    border: "1px solid var(--line-soft)",
+    borderRadius: 14,
     boxShadow: "0 1px 2px rgba(17,24,39,.04)",
   },
+  // Icon and number share a line: the old vertical stack made each card tall
+  // and mostly empty.
+  statTop: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 12,
+  },
   statIcon: {
-    width: 38,
-    height: 38,
+    width: 34,
+    height: 34,
     borderRadius: 10,
-    background: "var(--accent-soft)",
-    color: "var(--accent)",
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
   },
-  statIconAlert: { background: "rgba(234,67,53,.12)", color: "var(--danger)" },
   statValue: {
-    fontSize: 32,
-    fontWeight: 300,
+    fontSize: 28,
+    fontWeight: 400,
     lineHeight: 1,
     letterSpacing: "-0.02em",
     fontVariantNumeric: "tabular-nums",
     color: "var(--text)",
   },
-  statValueAlert: { color: "var(--danger)" },
-  statLabel: { fontSize: 13, color: "var(--muted)", marginTop: 9 },
+  statLabel: { fontSize: 13, color: "var(--text-2)", fontWeight: 500 },
+  statNote: { fontSize: 12, color: "var(--muted)", marginTop: 4 },
 
   columns: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
     gap: 16,
+    // Without this the shorter panel stretches to match the taller one and
+    // ends in a large empty block.
+    alignItems: "start",
   },
   panel: {
-    padding: "22px 24px 24px",
+    padding: "20px 22px 22px",
     background: "var(--panel)",
-    border: "1px solid var(--line)",
-    borderRadius: "var(--r-card)",
+    border: "1px solid var(--line-soft)",
+    borderRadius: 14,
     boxShadow: "0 1px 2px rgba(17,24,39,.04)",
   },
   panelHead: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 14,
+    marginBottom: 12,
+    paddingBottom: 12,
+    borderBottom: "1px solid var(--line-soft)",
   },
   h2: { fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" },
   quietLink: {
@@ -686,21 +768,23 @@ const S = {
     textDecoration: "none",
     color: "var(--text)",
   },
-  fileText: { display: "flex", flexDirection: "column", minWidth: 0 },
+  fileText: { display: "flex", flexDirection: "column", minWidth: 0, flex: 1 },
   fileName: {
     fontSize: 14,
+    fontWeight: 500,
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
   fileMeta: { fontSize: 12, color: "var(--muted)", marginTop: 3 },
+  rowArrow: { color: "var(--muted)", flexShrink: 0 },
 
   actRow: {
     display: "flex",
     alignItems: "flex-start",
     gap: 12,
-    padding: "12px 0",
-    borderTop: "1px solid var(--line-soft)",
+    padding: "11px 0",
+    borderBottom: "1px solid var(--line-soft)",
   },
   avatar: {
     width: 30,
@@ -723,8 +807,6 @@ const S = {
 
   muted: { color: "var(--muted)", fontSize: 13 },
 
-  // A first-run dashboard is mostly empty panels — give them something to
-  // say and somewhere to go, rather than one grey sentence.
   empty: {
     display: "flex",
     flexDirection: "column",
@@ -732,7 +814,7 @@ const S = {
     textAlign: "center",
     padding: "28px 16px 24px",
     background: "var(--bg)",
-    borderRadius: "var(--r-card)",
+    borderRadius: 12,
   },
   emptyIcon: {
     width: 44,
@@ -770,12 +852,12 @@ const S = {
     alignItems: "center",
     gap: 14,
     padding: "13px 0",
-    borderTop: "1px solid var(--line-soft)",
+    borderBottom: "1px solid var(--line-soft)",
   },
   coMark: {
     width: 34,
     height: 34,
-    borderRadius: 9,
+    borderRadius: 10,
     background: "var(--accent-soft)",
     color: "var(--accent)",
     display: "inline-flex",
